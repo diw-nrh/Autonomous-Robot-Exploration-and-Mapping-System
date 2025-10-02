@@ -1,0 +1,30 @@
+# RoboMaster Development Requirements
+# =================================
+
+# Core RoboMaster SDK
+robomaster>=0.1.1
+
+# Computer Vision and Image Processing
+opencv-python>=4.5.0
+Pillow>=8.0.0
+
+# Scientific Computing and Data Analysis
+numpy>=1.19.0
+scipy>=1.6.0
+matplotlib>=3.3.0
+
+# Serial Communication
+pyserial>=3.5
+
+# Network Interface Detection
+netifaces>=0.11.0
+
+# Additional Development Tools (optional but recommended)
+# jupyter>=1.0.0              # For interactive development
+# ipython>=7.0.0              # Enhanced Python shell
+# pytest>=6.0.0               # Testing framework
+# black>=21.0.0                # Code formatter
+# flake8>=3.8.0               # Linting tool
+
+# Data Processing and Logging
+pandas>=1.2.0
