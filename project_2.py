@@ -39,6 +39,7 @@ from robomaster import robot, vision
 # Matplotlib for real-time plotting and map visualization
 import matplotlib.pyplot as plt
 
+
 # =============================================================================
 # CONFIGURATION AND CONSTANTS
 # =============================================================================
@@ -49,7 +50,7 @@ START_POSITION = (0, 0)   # จุดเริ่ม (grid_x, grid_y)
 GRID_SIZE_M = 0.635                    # ขนาดกริดเป็นเมตร
 WALL_THRESHOLD_MM = 450                # เกณฑ์ระยะทางที่ถือว่ามีกำแพง (มม.)
 
-BORDER = (4, 4)                        # ขนาดพื้นที่สำรวจ (กริด: กว้าง x สูง)
+BORDER = (3, 3)                        # ขนาดพื้นที่สำรวจ (กริด: กว้าง x สูง)
 # Gimbal and Vision Settings
 GIMBAL_TURN_SPEED = 360                # ความเร็วหมุนกิมบอล (องศา/วินาที)
 CAMERA_HORIZONTAL_FOV = 96             # มุมมองกล้องแนวนอน (องศา)
@@ -467,18 +468,96 @@ class MazeExplorer:
     # ========================================================================
     # Sensor Scanning Functions
     # ========================================================================
-    
-    def _read_sharp_sensors(self):
+    def adc_to_distance_left(self, adc_value):
+        """
+        แปลงค่า ADC เป็น mm สำหรับ Sharp Left
+        ข้อมูลการวัด:
+        150mm -> 224 ADC
+        100mm -> 357 ADC
+        50mm  -> 698 ADC
+        
+        ใช้ linear interpolation และ extrapolation
+        """
+        if adc_value <= 0:
+            return 999  # Invalid reading
+        
+        # ข้อมูลจุดอ้างอิง (adc, distance)
+        points = [(224, 150), (357, 100), (698, 50)]
+        
+        # หาจุดที่ใกล้ที่สุด 2 จุดสำหรับ interpolation
+        if adc_value <= 224:
+            # Extrapolate จากจุดแรกสองจุด
+            x1, y1 = 224, 150
+            x2, y2 = 357, 100
+        elif adc_value <= 357:
+            # Interpolate ระหว่างจุดแรกและจุดที่สอง
+            x1, y1 = 224, 150
+            x2, y2 = 357, 100
+        elif adc_value <= 698:
+            # Interpolate ระหว่างจุดที่สองและจุดที่สาม
+            x1, y1 = 357, 100
+            x2, y2 = 698, 50
+        else:
+            # Extrapolate จากจุดสุดท้ายสองจุด
+            x1, y1 = 357, 100
+            x2, y2 = 698, 50
+        
+        # Linear interpolation: y = y1 + (y2-y1) * (x-x1) / (x2-x1)
+        distance = y1 + (y2 - y1) * (adc_value - x1) / (x2 - x1)
+        
+        return max(20, min(300, distance))
+
+    def adc_to_distance_right(self, adc_value):
+        """
+        แปลงค่า ADC เป็น mm สำหรับ Sharp Right
+        ข้อมูลการวัด:
+        150mm -> 235 ADC
+        100mm -> 364 ADC
+        50mm  -> 705 ADC
+        
+        ใช้ linear interpolation และ extrapolation
+        """
+        if adc_value <= 0:
+            return 999  # Invalid reading
+        
+        # ข้อมูลจุดอ้างอิง (adc, distance)
+        points = [(235, 150), (364, 100), (705, 50)]
+        
+        # หาจุดที่ใกล้ที่สุด 2 จุดสำหรับ interpolation
+        if adc_value <= 235:
+            # Extrapolate จากจุดแรกสองจุด
+            x1, y1 = 235, 150
+            x2, y2 = 364, 100
+        elif adc_value <= 364:
+            # Interpolate ระหว่างจุดแรกและจุดที่สอง
+            x1, y1 = 235, 150
+            x2, y2 = 364, 100
+        elif adc_value <= 705:
+            # Interpolate ระหว่างจุดที่สองและจุดที่สาม
+            x1, y1 = 364, 100
+            x2, y2 = 705, 50
+        else:
+            # Extrapolate จากจุดสุดท้ายสองจุด
+            x1, y1 = 364, 100
+            x2, y2 = 705, 50
+        
+        # Linear interpolation: y = y1 + (y2-y1) * (x-x1) / (x2-x1)
+        distance = y1 + (y2 - y1) * (adc_value - x1) / (x2 - x1)
+        
+        return max(20, min(300, distance))
+
+    def _read_ir_sensors(self):
         """อ่านข้อมูลจาก Sharp sensors และ invert ค่า"""
         sharp_left_raw = self.ep_adaptor.get_adc(id=1, port=2)   # Sharp ซ้าย
         sharp_right_raw = self.ep_adaptor.get_adc(id=2, port=1)  # Sharp ขวา
-
+        wall_ir_left = not self.ep_adaptor.get_io(id=1,port=1)
+        wall_ir_right = not  self.ep_adaptor.get_io(id=2,port=2)
+        
         # Invert ค่า boolean (0->True, 1->False)
-        wall_left_dist = None #samakan
-        wall_right_dist = None #samakan
-
+        wall_left_dist = self.adc_to_distance_left(sharp_left_raw)   #samakan
+        wall_right_dist = self.adc_to_distance_right(sharp_right_raw) #samakan
         print(f"   Sharp sensors: Left={wall_left_dist} (raw:{sharp_left_raw}), Right={wall_right_dist} (raw:{sharp_right_raw})")
-        return wall_left_dist, wall_right_dist
+        return wall_ir_left, wall_ir_right, wall_left_dist, wall_right_dist
 
     def _get_neighbor_position(self, scan_direction):
         """คำนวณตำแหน่งเพื่อนบ้านตามทิศทาง"""
@@ -500,13 +579,13 @@ class MazeExplorer:
             return has_wall, distance_mm
             
         elif relative_direction == 1:  # ด้านขวา -> ใช้ IR ขวา
-            distance_mm = wall_right
+            distance_mm = 100 if wall_right else 1000
             has_wall = distance_mm < WALL_THRESHOLD_MM
             print(f"         - IR Right: Wall={wall_right}")
             return has_wall, distance_mm
             
         elif relative_direction == 3:  # ด้านซ้าย -> ใช้ IR ซ้าย
-            distance_mm = wall_left
+            distance_mm = 100 if wall_left else 1000
             has_wall = distance_mm < WALL_THRESHOLD_MM
             print(f"         - IR Left: Wall={wall_left}")
             return has_wall, distance_mm
@@ -531,7 +610,7 @@ class MazeExplorer:
         self.internal_map.mark_explored(self.current_position)
         
         wall_distances = {}
-        
+        self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
         # กำหนดทิศที่ไม่ต้องสแกน (ทิศที่มาจากตำแหน่งก่อนหน้า)
         direction_to_skip = -1
         if previous_position:
@@ -541,8 +620,8 @@ class MazeExplorer:
             print(f"   -> Will skip physical scan for direction {ORIENTATIONS.get(direction_to_skip, 'N/A')}.")
 
         # อ่านข้อมูล IR sensors ครั้งเดียว
-        wall_left, wall_right = self._read_sharp_sensors()
-
+        wall_left, wall_right,_,_ = self._read_ir_sensors()
+       
         # สแกนทั้ง 4 ทิศ
         for scan_direction in range(4):
             if scan_direction == direction_to_skip:
@@ -746,29 +825,30 @@ class MazeExplorer:
         try:
             # ToF หน้า
             front_distance_mm = self.tof_handler.get_distance()
-            
-            sharp_left, sharp_right = self._read_sharp_sensors()
 
-            print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left}, Right={sharp_right}")
+            wall_left, wall_right, sharp_left_dist, sharp_right_dist = self._read_ir_sensors()
+            sharp_left_dist = self.adc_to_distance_left(sharp_left_dist)
+            sharp_right_dist = self.adc_to_distance_right(sharp_right_dist)
+            print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left_dist:.1f}mm, Right={sharp_right_dist:.1f}mm")
 
             # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
             if front_distance_mm < WALL_THRESHOLD_MM:
                 move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
                 if abs(move_dist_m) > 0.025:
                     print(f"   Adjusting distance from front wall: {move_dist_m:.2f}m")
-                    self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.3).wait_for_completed()
+                    self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
                     time.sleep(0.2)
-            if sharp_left is not None and sharp_left < WALL_THRESHOLD_MM:
-                move_dist_m = (sharp_left / 1000.0) - target_clearance_m
+            if wall_left:
+                move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m
                 if abs(move_dist_m) > 0.025:
                     print(f"   Adjusting distance from left wall: {move_dist_m:.2f}m")
                     self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
                     time.sleep(0.2)
-            if sharp_right is not None and sharp_right < WALL_THRESHOLD_MM:
-                move_dist_m = (sharp_right / 1000.0) - target_clearance_m
+            elif wall_right:
+                move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m
                 if abs(move_dist_m) > 0.025:
                     print(f"   Adjusting distance from right wall: {move_dist_m:.2f}m")
-                    self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
+                    self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
                     time.sleep(0.2)
             
             self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
