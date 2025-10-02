@@ -459,17 +459,12 @@ class MazeExplorer:
     # Sensor Scanning Functions
     # ========================================================================
     
-    def _read_ir_sensors(self):
-        """อ่านข้อมูลจาก IR sensors และ invert ค่า"""
-        ir_left_raw = self.ep_adaptor.get_io(id=1, port=1)   # IR ซ้าย
-        ir_right_raw = self.ep_adaptor.get_io(id=1, port=2)  # IR ขวา
-        
-        # Invert ค่า boolean (0->True, 1->False)
-        wall_left = not ir_left_raw
-        wall_right = not ir_right_raw
-        
-        print(f"   IR sensors: Left={wall_left} (raw:{ir_left_raw}), Right={wall_right} (raw:{ir_right_raw})")
-        return wall_left, wall_right
+    def _read_sharp_sensors(self):
+        """อ่านข้อมูลจาก Sharp sensors และ invert ค่า"""
+        sharp_left_raw = self.ep_adaptor.get_adc(id=1, port=2)   # Sharp ซ้าย
+        sharp_right_raw = self.ep_adaptor.get_adc(id=2, port=1)  # Sharp ขวา
+
+        return sharp_left_raw, sharp_right_raw
     
     def _get_neighbor_position(self, scan_direction):
         """คำนวณตำแหน่งเพื่อนบ้านตามทิศทาง"""
@@ -491,14 +486,16 @@ class MazeExplorer:
             return has_wall, distance_mm
             
         elif relative_direction == 1:  # ด้านขวา -> ใช้ IR ขวา
-            distance_mm = 100.0 if wall_right else 1000.0
+            distance_mm = None
+            has_wall = distance_mm < WALL_THRESHOLD_MM
             print(f"         - IR Right: Wall={wall_right}")
             return wall_right, distance_mm
             
         elif relative_direction == 3:  # ด้านซ้าย -> ใช้ IR ซ้าย
-            distance_mm = 100.0 if wall_left else 1000.0
+            distance_mm = None
+            has_wall = distance_mm < WALL_THRESHOLD_MM
             print(f"         - IR Left: Wall={wall_left}")
-            return wall_left, distance_mm
+            return has_wall, distance_mm
             
         else:  # ด้านหลัง -> สมมติไม่มีกำแพง
             distance_mm = 1000.0
@@ -529,8 +526,8 @@ class MazeExplorer:
             direction_to_skip = (self.current_orientation + 2) % 4
             print(f"   -> Will skip physical scan for direction {ORIENTATIONS.get(direction_to_skip, 'N/A')}.")
 
-        # อ่านข้อมูล IR sensors ครั้งเดียว
-        wall_left, wall_right = self._read_ir_sensors()
+        # อ่านข้อมูล Sharp sensors ครั้งเดียว
+        wall_left, wall_right = self._read_sharp_sensors()
 
         # สแกนทั้ง 4 ทิศ
         for scan_direction in range(4):
@@ -749,15 +746,11 @@ class MazeExplorer:
         try:
             # ToF หน้า
             front_distance_mm = self.tof_handler.get_distance()
-            
-            # IR ซ้าย/ขวา
-            ir_left = self.ep_adaptor.get_adc(id=1, port=1)
-            ir_right = self.ep_adaptor.get_adc(id=1, port=2)
-            
-            wall_left = ir_left > 0.5
-            wall_right = ir_right > 0.5
-            
-            print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={wall_left}, Right={wall_right}")
+            # Sharp ซ้าย/ขวา
+            sharp_left = self.ep_adaptor.get_adc(id=1, port=2)
+            sharp_right = self.ep_adaptor.get_adc(id=2, port=1)
+
+            print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left}, Right={sharp_right}")
             
             # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
             if front_distance_mm < WALL_THRESHOLD_MM:
@@ -765,6 +758,18 @@ class MazeExplorer:
                 if abs(move_dist_m) > 0.025:
                     print(f"   Adjusting distance from front wall: {move_dist_m:.2f}m")
                     self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.3).wait_for_completed()
+                    time.sleep(0.2)
+            if sharp_left is not None and sharp_left < WALL_THRESHOLD_MM:
+                move_dist_m = (sharp_left / 1000.0) - target_clearance_m
+                if abs(move_dist_m) > 0.025:
+                    print(f"   Adjusting distance from left wall: {move_dist_m:.2f}m")
+                    self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
+                    time.sleep(0.2)
+            if sharp_right is not None and sharp_right < WALL_THRESHOLD_MM:
+                move_dist_m = (sharp_right / 1000.0) - target_clearance_m
+                if abs(move_dist_m) > 0.025:
+                    print(f"   Adjusting distance from right wall: {move_dist_m:.2f}m")
+                    self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
                     time.sleep(0.2)
             
             self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
@@ -885,9 +890,6 @@ class MazeExplorer:
         3. แสดงแผนที่แบบ real-time
         4. บันทึกข้อมูลเซ็นเซอร์และเส้นทาง
         """
-        start_time = time.time()
-        time_limit_seconds = 600
-        print(f"Mission started! Time limit: {time_limit_seconds} seconds.")
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
 
         # เริ่มต้น real-time plotting
@@ -895,11 +897,6 @@ class MazeExplorer:
         self.update_real_time_plot()  # แสดงแผนที่เริ่มต้น
 
         while True:
-            elapsed_time = time.time() - start_time
-            if elapsed_time >= time_limit_seconds:
-                print(f"\n--- TIME'S UP! ({int(elapsed_time)}s elapsed) ---")
-                self.ep_led.set_led(r=255, g=193, b=7, effect="flash")
-                break
 
 
             if self.current_position not in self.internal_map.explored:
