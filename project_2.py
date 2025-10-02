@@ -1063,6 +1063,20 @@ class MazeExplorer:
             print("[LAP2] ไม่มี state รอบ 1 ให้โหลด หยุดการทำงาน")
             return
 
+        print(f"📍 Lab2 starting position: {self.current_position}")
+        print(f"🧭 Lab2 starting orientation: {ORIENTATIONS[self.current_orientation]}")
+        print(f"🎯 Total targets to visit: {len(self.targets)}")
+        
+        # ตัวเลือก: Reset position manually (แนะนำสำหรับความแม่นยำ)
+        reset_pos = input(f"\n🤖 วางหุ่นยนต์ที่ตำแหน่ง {self.current_position} หันทิศ {ORIENTATIONS[self.current_orientation]}\nต้องการ reset ตำแหน่งเป็น (0,0) ไหม? (y/N): ").strip().lower()
+        if reset_pos == 'y':
+            print("🔄 Resetting to START_POSITION (0,0)")
+            self.current_position = START_POSITION
+            self.current_orientation = 0
+            # Reset physical pose
+            self.pose_handler.set_xy(0, 0)
+            self.pose_handler.set_yaw(0)
+
         self.lap2_path = [self.current_position]
         self.lap2_shot_targets = set()
 
