@@ -1,15 +1,15 @@
 """
 =================================================================================
-MAZE EXPLORATION ROBOT WITH IR SENSORS AND REAL-TIME MAPPING
+LAB 1: MAZE EXPLORATION ROBOT
 =================================================================================
 Description: หุ่นยนต์สำรวจเขาวงกต โดยใช้ ToF sensor ด้านหน้า และ IR sensors ด้านข้าง
-            พร้อมแสดงแผนที่แบบ real-time
+            เฉพาะการสำรวจทั้งหมด ไม่มี goal
 
 Features:
 - ToF sensor สำหรับวัดระยะด้านหน้า
 - IR digital sensors สำหรับตรวจจับกำแพงด้านซ้าย/ขวา
 - Real-time mapping แสดงแผนที่ขณะสำรวจ
-- Complete maze exploration
+- Complete maze exploration only
 - CSV logging และ state saving/loading
 
 Hardware Requirements:
@@ -213,18 +213,23 @@ class RobotMap:
             return []
         return [n for n in self.graph.get(position, []) if n not in self.explored]
         
-    def get_path(self, start):
-        """หาเส้นทางด้วย BFS"""
+    def get_path(self, start, goal):
+        """หาเส้นทางจาก start ไป goal ด้วย BFS"""
+        if start == goal: 
+            return [start]
         queue = [(start, [start])]
         visited = {start}
-        print("queue: ", queue)
+        print(f"Finding path from {start} to {goal}")
         while queue:
             current, path = queue.pop(0)
             for neighbor in self.graph.get(current, []):
                 if neighbor not in visited:
+                    if neighbor == goal: 
+                        return path + [neighbor]
                     visited.add(neighbor)
                     queue.append((neighbor, path + [neighbor]))
         return None
+
 
 
 class PIDController:
@@ -267,7 +272,7 @@ class MazeExplorer:
     - สำรวจเขาวงกตแบบอัตโนมัติ
     - ใช้ ToF + IR sensors
     - Real-time mapping
-    - Complete exploration
+    - Complete exploration only
     - CSV logging
     """
     
@@ -302,10 +307,10 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         
         # Exploration settings
-        self.border = (4, 4)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (4, 5)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
-        # Exploration settings  
+        # Exploration settings
         self.exploration_complete = False  # flag สำรวจครบหรือยัง
         
         # Marker detection (ถ้าต้องการใช้)
@@ -618,7 +623,7 @@ class MazeExplorer:
 
     def decide_next_path(self):
         """
-        ตัดสินใจหาเส้นทางถัดไป - สำรวจให้ครบทุกจุด
+        ตัดสินใจหาเส้นทางถัดไป - สำรวจทั้งหมดเท่านั้น
         
         Returns:
             list: เส้นทางที่ต้องเดิน หรือ None หากสำรวจครบแล้ว
@@ -785,7 +790,7 @@ class MazeExplorer:
     # Movement and PID Control Functions
     # ========================================================================
     
-    def move_forward_pid(self, distance_m, speed_limit=0.2):
+    def move_forward_pid(self, distance_m, speed_limit=0.5):
         """
         ใช้ PID controller เพื่อเคลื่อนที่ไปข้างหน้าระยะทางที่กำหนด
         
@@ -907,7 +912,7 @@ class MazeExplorer:
             path_to_execute = self.decide_next_path()
             if not path_to_execute:
                 print(f"\n--- EXPLORATION COMPLETE! All areas explored ---")
-                self.ep_led.set_led(r=0, g=255, b=0, effect="on")  # เขียว = สำเร็จ
+                self.ep_led.set_led(r=0, g=255, b=0, effect="on")
                 break
             self.execute_path(path_to_execute)
             # อัปเดตแผนที่หลังเคลื่อนที่
