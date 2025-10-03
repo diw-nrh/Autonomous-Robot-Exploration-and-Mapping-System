@@ -90,7 +90,7 @@ START_POSITION = (0, 0)   # จุดเริ่ม (grid_x, grid_y)
 GRID_SIZE_M = 0.635                    # ขนาดกริดเป็นเมตร
 WALL_THRESHOLD_MM = 450                # เกณฑ์ระยะทางที่ถือว่ามีกำแพง (มม.)
 
-BORDER = (3, 3)                        # ขนาดพื้นที่สำรวจ (กริด: กว้าง x สูง)
+BORDER = (4, 5)                        # ขนาดพื้นที่สำรวจ (กริด: กว้าง x สูง)
 # Gimbal and Vision Settings
 GIMBAL_TURN_SPEED = 360                # ความเร็วหมุนกิมบอล (องศา/วินาที)
 CAMERA_HORIZONTAL_FOV = 96             # มุมมองกล้องแนวนอน (องศา)
@@ -250,6 +250,11 @@ def shoot_target(position, robot_instance=None, detection_data=None):
     """
     ยิงเป้าหมาย ณ ตำแหน่งที่กำหนดด้วย PID control
     
+    เงื่อนไขการยิง:
+    1. ต้องหันหน้าไปข้างหน้า (orientation = 0)
+    2. ระยะ ToF ต้องไม่เกิน 1.2 m (1200 mm)
+    3. ต้องพบเป้าหมายด้วย vision system
+    
     Args:
         position: ตำแหน่งเป้าในกริด
         robot_instance: instance ของหุ่นยนต์
@@ -286,6 +291,34 @@ def shoot_target(position, robot_instance=None, detection_data=None):
             print(f"[SHOOTING] ⚠️ ไม่สามารถใช้ vision ได้: {e}")
         
         if target_found and final_target_position:
+            # ตรวจสอบเงื่อนไขก่อนยิง
+            print("[SHOOTING] 🔍 ตรวจสอบเงื่อนไขการยิง...")
+            
+            # 1. ตรวจสอบทิศทาง - ต้องหันไปข้างหน้า (orientation = 0)
+            current_orientation = robot_instance.current_orientation if hasattr(robot_instance, 'current_orientation') else 0
+            if current_orientation != 0:
+                print(f"[SHOOTING] ❌ ทิศทางไม่ถูกต้อง - ปัจจุบัน: {current_orientation}, ต้องการ: 0 (หน้า)")
+                target_storage.mark_target_shot(position)
+                return
+            
+            # 2. ตรวจสอบระยะ ToF - ต้องไม่เกิน 1.2 m (1200 mm)
+            if hasattr(robot_instance, 'tof_handler') and robot_instance.tof_handler:
+                tof_distance = robot_instance.tof_handler.get_distance()
+                max_distance_mm = 1200  # 1.2 m
+                
+                print(f"[SHOOTING] 📏 ระยะ ToF: {tof_distance:.1f} mm (สูงสุด: {max_distance_mm} mm)")
+                
+                if tof_distance > max_distance_mm:
+                    print(f"[SHOOTING] ❌ ระยะไกลเกินไป - ToF: {tof_distance:.1f} mm > {max_distance_mm} mm")
+                    target_storage.mark_target_shot(position)
+                    return
+                else:
+                    print(f"[SHOOTING] ✅ ระยะเหมาะสม - ToF: {tof_distance:.1f} mm")
+            else:
+                print("[SHOOTING] ⚠️ ไม่มี ToF sensor - ข้ามการตรวจสอบระยะ")
+            
+            print("[SHOOTING] ✅ ผ่านเงื่อนไขทั้งหมด - เริ่มการเล็ง")
+            
             # ใช้ PID เพื่อปรับทิศทางให้ตรงเป้า
             print("[SHOOTING] 🎯 ปรับทิศทางแม่นยำด้วย PID...")
             
@@ -337,31 +370,36 @@ def shoot_target(position, robot_instance=None, detection_data=None):
                 except Exception as e:
                     print(f"[SHOOTING] ข้อผิดพลาดในการปรับทิศ: {e}")
                     break
-        
-        # ดำเนินการยิง
-        print("[SHOOTING] 🔥 ยิง!")
-        robot_instance.ep_led.set_led(r=255, g=0, b=0, effect="flash")
-        
-        # จำลองการยิง (แทนที่ด้วยคำสั่งยิงจริง)
-        # TODO: เพิ่มคำสั่งยิงจริง เช่น robot_instance.ep_blaster.fire()
-        time.sleep(0.5)  # เวลาการยิง
-        
-        # ใช้เสียงสัญญาณ (ถ้ามี)
-        try:
-            if hasattr(robot_instance, 'ep_speaker') and robot_instance.ep_speaker:
-                robot_instance.ep_speaker.play_sound(sound_id=1)  # เสียงยิง
-        except:
-            pass
-        
-        # รีเซ็ต gimbal กลับตำแหน่งเดิม
-        robot_instance.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-        
-        # เปลี่ยนสี LED เป็นเขียวเพื่อแสดงความสำเร็จ
-        robot_instance.ep_led.set_led(r=0, g=255, b=0, effect="on")
-        time.sleep(1)
-        robot_instance.ep_led.set_led(r=0, g=0, b=255, effect="on")  # กลับเป็นสีปกติ
-        
-        print(f"[SHOOTING] ✅ ยิงเป้าที่ {position} เสร็จสิ้น")
+            
+            # ดำเนินการยิง
+            print("[SHOOTING] 🔥 ยิง!")
+            robot_instance.ep_led.set_led(r=255, g=0, b=0, effect="flash")
+            
+            # จำลองการยิง (แทนที่ด้วยคำสั่งยิงจริง)
+            # TODO: เพิ่มคำสั่งยิงจริง เช่น robot_instance.ep_blaster.fire()
+            time.sleep(0.5)  # เวลาการยิง
+            
+            # ใช้เสียงสัญญาณ (ถ้ามี)
+            try:
+                if hasattr(robot_instance, 'ep_speaker') and robot_instance.ep_speaker:
+                    robot_instance.ep_speaker.play_sound(sound_id=1)  # เสียงยิง
+            except:
+                pass
+            
+            # รีเซ็ต gimbal กลับตำแหน่งเดิม
+            robot_instance.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+            
+            # เปลี่ยนสี LED เป็นเขียวเพื่อแสดงความสำเร็จ
+            robot_instance.ep_led.set_led(r=0, g=255, b=0, effect="on")
+            time.sleep(1)
+            robot_instance.ep_led.set_led(r=0, g=0, b=255, effect="on")  # กลับเป็นสีปกติ
+            
+            print(f"[SHOOTING] ✅ ยิงเป้าที่ {position} เสร็จสิ้น")
+            
+        else:
+            print("[SHOOTING] ❌ ไม่ผ่านเงื่อนไขการยิง หรือ ไม่พบเป้าหมาย")
+            # รีเซ็ต gimbal กลับตำแหน่งเดิม
+            robot_instance.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         
     except Exception as e:
         print(f"[SHOOTING] ❌ ข้อผิดพลาด: {e}")
@@ -371,19 +409,6 @@ def shoot_target(position, robot_instance=None, detection_data=None):
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
-
-def wrap_angle_deg(angle_deg: float) -> float:
-    """ห่อมุมให้อยู่ในช่วง (-180, 180]"""
-    while angle_deg <= -180.0:
-        angle_deg += 360.0
-    while angle_deg > 180.0:
-        angle_deg -= 360.0
-    return angle_deg
-
-def sub_angle(a_deg: float, b_deg: float) -> float:
-    """คืนค่า (a - b) แบบ wrap ในช่วง (-180, 180]"""
-    return wrap_angle_deg(a_deg - b_deg)
-
 
 # =============================================================================
 # DATA HANDLERS AND SENSOR MANAGEMENT
@@ -1184,13 +1209,13 @@ class MazeExplorer:
                     self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
                     time.sleep(0.2)
             if wall_left:
-                move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m
+                move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m+0.1
                 if abs(move_dist_m) > 0.025:
                     print(f"   Adjusting distance from left wall: {move_dist_m:.2f}m")
                     self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
                     time.sleep(0.2)
             elif wall_right:
-                move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m
+                move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m+0.1
                 if abs(move_dist_m) > 0.025:
                     print(f"   Adjusting distance from right wall: {move_dist_m:.2f}m")
                     self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
