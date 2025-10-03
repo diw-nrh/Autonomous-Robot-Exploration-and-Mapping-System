@@ -2,7 +2,7 @@
 Compact Vision Detection for Project_2 with Object Tracking
 =========================================================
 ใช้สำหรับตรวจจับรูปทรงและสีในขั้นตอน scan หลังจากสแกนกำแพงเสร็จ
-พร้อมฟีเจอร์หันตามวัตถุที่ detect ได้
+พร้อมฟังก์ชัน gimbal tracking และการยิง
 """
 
 import cv2
@@ -51,7 +51,7 @@ class CompactVisionDetector:
         
         # ความเร็ว gimbal (ปรับได้)
         self.gimbal_speed = 30  # degrees per second
-        
+    
     def set_target(self, color, shape):
         """ตั้งค่าเป้าหมาย"""
         self.target_color = color
@@ -114,6 +114,19 @@ class CompactVisionDetector:
                            math.sqrt((pos[0] - self.center_x)**2 + (pos[1] - self.center_y)**2))
         
         return self.track_object(closest_target[0], closest_target[1])
+    
+    def reset_gimbal(self):
+        """รีเซ็ต gimbal กลับไปตำแหน่งกลาง"""
+        if not self.ep:
+            return False
+        
+        try:
+            self.ep.gimbal.recenter().wait_for_completed()
+            print("🔄 รีเซ็ต gimbal เรียบร้อย")
+            return True
+        except Exception as e:
+            print(f"❌ ข้อผิดพลาดในการรีเซ็ต gimbal: {e}")
+            return False
     
     def detect(self, frame):
         """ตรวจจับเป้าหมาย - คืนค่า [(center_x, center_y), ...] หรือ []"""
@@ -191,19 +204,6 @@ class CompactVisionDetector:
         
         return detections
     
-    def reset_gimbal(self):
-        """รีเซ็ต gimbal กลับไปตำแหน่งกลาง"""
-        if not self.ep:
-            return False
-        
-        try:
-            self.ep.gimbal.recenter().wait_for_completed()
-            print("🔄 รีเซ็ต gimbal เรียบร้อย")
-            return True
-        except Exception as e:
-            print(f"❌ ข้อผิดพลาดในการรีเซ็ต gimbal: {e}")
-            return False
-    
     def get_display_color(self):
         """ได้สีสำหรับการแสดงผลตามเป้าหมายปัจจุบัน"""
         if not self.target_color:
@@ -240,9 +240,48 @@ def test_gimbal_movement(ep):
         ep.gimbal.move(yaw=10, pitch=0, yaw_speed=30).wait_for_completed()
         time.sleep(0.5)
         ep.gimbal.recenter().wait_for_completed()
+        print("✅ Gimbal ทำงานปกติ")
         return True
     except Exception as e:
         print(f"❌ Gimbal ไม่ทำงาน: {e}")
+        return False
+
+
+def shoot_target_with_gimbal(ep, ep_camera, target_color, target_shape):
+    """ยิงเป้าหมายด้วยการใช้ gimbal tracking"""
+    try:
+        # สร้าง detector สำหรับการยิง
+        detector = CompactVisionDetector(ep=ep)
+        detector.set_target(target_color, target_shape)
+        
+        print(f"🎯 เริ่มการยิง {target_color} {target_shape}")
+        
+        # ลองหาเป้าหมายและหันหา 3 ครั้ง
+        for attempt in range(3):
+            frame = ep_camera.read_cv2_image(strategy="newest", timeout=1.0)
+            if frame is None:
+                continue
+                
+            detections = detector.detect_and_track(frame, auto_track=True)
+            
+            if detections:
+                # รอให้ gimbal หยุดนิ่ง
+                time.sleep(0.5)
+                
+                # ยิง!
+                ep.blaster.fire(fire_type="infrared", times=1)
+                print(f"🔥 ยิงครั้งที่ {attempt + 1}")
+                time.sleep(0.3)
+                
+                return True
+            
+            time.sleep(0.2)
+        
+        print("❌ ไม่พบเป้าหมายสำหรับการยิง")
+        return False
+        
+    except Exception as e:
+        print(f"❌ ข้อผิดพลาดในการยิง: {e}")
         return False
 
 
@@ -273,7 +312,7 @@ if __name__ == "__main__":
     print(f"  สีเก่า (legacy): {available_colors['legacy']}")
     
     # ตั้งค่าเป้าหมาย - ลองใช้สีใหม่
-    target_color = "blue"  # เปลี่ยนได้: brown_red, dark_green, yellow_brown, dark_blue, dark_purple_red, vivid_dark_red
+    target_color = "dark_green"  # เปลี่ยนได้: brown_red, dark_green, yellow_brown, dark_blue, dark_purple_red, vivid_dark_red
     target_shape = "circle"       # หรือ rectangle, triangle
     
     detector.set_target(target_color, target_shape)
@@ -283,7 +322,8 @@ if __name__ == "__main__":
     print(f"🎯 กำลังหา: {target_color} {target_shape}")
     print(f"🌈 สีแสดงผล: {display_color}")
     print("📋 คำสั่ง:")
-    print("  - SPACE: เปิด/ปิด auto tracking")
+    print("  - SPACE: ยิงเป้าหมาย")
+    print("  - T: เปิด/ปิด auto tracking")
     print("  - R: รีเซ็ต gimbal")
     print("  - ESC: ออก")
     
@@ -320,7 +360,7 @@ if __name__ == "__main__":
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 cv2.putText(frame, f"Auto Tracking: {'ON' if auto_tracking else 'OFF'}", (10, 90), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if auto_tracking else (0, 0, 255), 2)
-                cv2.putText(frame, "ESC:quit | SPACE:toggle tracking | R:reset gimbal", (10, 120), 
+                cv2.putText(frame, "ESC:quit | SPACE:shoot | T:tracking | R:reset", (10, 120), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
                 cv2.imshow("Compact Vision Detection with Tracking", frame)
@@ -334,7 +374,17 @@ if __name__ == "__main__":
                 key = cv2.waitKey(1) & 0xFF
                 if key == 27:  # ESC to quit
                     break
-                elif key == 32:  # SPACE to toggle auto tracking
+                elif key == 32:  # SPACE to shoot
+                    if detections:
+                        print("🎯 เริ่มการยิง!")
+                        success = shoot_target_with_gimbal(ep, ep_camera, target_color, target_shape)
+                        if success:
+                            print("✅ ยิงสำเร็จ!")
+                        else:
+                            print("❌ ยิงไม่สำเร็จ!")
+                    else:
+                        print("⚠️ ไม่พบเป้าหมาย - ไม่สามารถยิงได้")
+                elif key == ord('t') or key == ord('T'):  # T to toggle auto tracking
                     auto_tracking = not auto_tracking
                     print(f"🔄 Auto tracking: {'เปิด' if auto_tracking else 'ปิด'}")
                 elif key == ord('r') or key == ord('R'):  # R to reset gimbal
