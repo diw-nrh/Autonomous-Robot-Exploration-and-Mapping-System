@@ -1,17 +1,19 @@
 """
-Compact Vision Detection for Project_2
-=====================================
+Compact Vision Detection for Project_2 with Object Tracking
+=========================================================
 ใช้สำหรับตรวจจับรูปทรงและสีในขั้นตอน scan หลังจากสแกนกำแพงเสร็จ
+พร้อมฟังก์ชัน gimbal tracking และการยิง
 """
 
 import cv2
 import numpy as np
 import time
 import math
-import time
+import queue
 from robomaster import robot
+
 class CompactVisionDetector:
-    """ระบบตรวจจับรูปทรงและสีแบบย่อ"""
+    """ระบบตรวจจับรูปทรงและสีแบบย่อพร้อม object tracking"""
     
     def __init__(self):
         # กำหนดช่วงสี HSV และสีสำหรับการแสดงผล
@@ -87,11 +89,12 @@ class CompactVisionDetector:
             
             shape = None
             if vertices >= 8:
-                # ตรวจสอบความเป็นวงกลม
                 area = cv2.contourArea(cnt)
                 circularity = 4 * np.pi * area / (perimeter * perimeter)
                 if circularity > 0.7:
                     shape = 'circle'
+            elif vertices == 3:
+                shape = 'triangle'
             elif vertices == 4:
                 # ใช้ bounding box เพื่อแยกประเภทสี่เหลี่ยม
                 x, y, w_box, h_box = cv2.boundingRect(cnt)
@@ -103,7 +106,8 @@ class CompactVisionDetector:
                     shape = 'horizontal_rectangle'  # สี่เหลี่ยมผืนผ้าแนวนอน (กว้างมากกว่าสูง)
                 elif aspect_ratio < 0.7:
                     shape = 'vertical_rectangle'  # สี่เหลี่ยมผืนผ้าแนวตั้ง (สูงมากกว่ากว้าง)
-                # ไม่มี else เพราะไม่ต้องการรูปทรงอื่นๆ
+                else:
+                    shape = 'rectangle'  # สี่เหลี่ยมทั่วไป
             
             if shape == self.target_shape:
                 x, y, w_box, h_box = cv2.boundingRect(cnt)
@@ -139,107 +143,82 @@ class CompactVisionDetector:
             "all": legacy_colors + new_colors
         }
 
-
-if __name__ == "__main__":
-    # Example test code for detection using RoboMaster camera
-    ep = robot.Robot()
-    ep.initialize(conn_type="ap")  # เชื่อมต่อแบบ station mode (ปรับตามการเชื่อนต่อของคุณ)
-    ep_camera = ep.camera
-    ep_camera.start_video_stream(display=False)
+def run_robomaster_detection(target_color='red', target_shape='circle'):
+    """
+    รันการตรวจจับวัตถุด้วยกล้อง RoboMaster แบบสั้นๆ
     
-    # ทดสอบ gimbal ก่อน
-    print("🔧 ทดสอบระบบ gimbal...")
+    target_color: สีเป้าหมาย ('red', 'green', 'blue', 'yellow')
+    target_shape: รูปทรงเป้าหมาย
+        - 'circle': วงกลม
+        - 'square': สี่เหลี่ยมจัตุรัส  
+        - 'vertical_rectangle': สี่เหลี่ยมผืนผ้าแนวตั้ง
+        - 'horizontal_rectangle': สี่เหลี่ยมผืนผ้าแนวนอน
+    """
+    import robomaster.robot as robot
+    import cv2
+    import queue
     
-
-    
-    detector = CompactVisionDetector()
-    
-    # แสดงสีที่ใช้งานได้
-    available_colors = detector.get_available_colors()
-    print("🎨 สีที่ใช้งานได้:")
-    print(f"  สีใหม่: {available_colors['new']}")
-    print(f"  สีเก่า (legacy): {available_colors['legacy']}")
-    print("📐 รูปทรงที่รองรับ (4 รูปแบบ):")
-    print("  • circle - วงกลม")
-    print("  • square - สี่เหลี่ยมจัตุรัส")
-    print("  • vertical_rectangle - สี่เหลี่ยมผืนผ้าแนวตั้ง")
-    print("  • horizontal_rectangle - สี่เหลี่ยมผืนผ้าแนวนอน")
-    
-    # ตั้งค่าเป้าหมาย - ลองใช้สีใหม่
-    target_color = "dark_green"  # เปลี่ยนได้: brown_red, dark_green, yellow_brown, dark_blue, dark_purple_red, vivid_dark_red
-    target_shape = "circle"       # รูปทรงที่รองรับ: circle, square, vertical_rectangle, horizontal_rectangle
-    
-    detector.set_target(target_color, target_shape)
-    display_color = detector.get_display_color()
-
-    print(f"🎥 เริ่มทดสอบการตรวจจับ - กด ESC หรือ Q เพื่อออก")
-    print(f"🎯 กำลังหา: {target_color} {target_shape}")
-    print(f"🌈 สีแสดงผล: {display_color}")
-    print("💡 หน้าต่างกล้องจะเปิดขึ้นมา กด ESC หรือ Q เพื่อปิด")
+    print(f"🎯 เริ่มตรวจจับ {target_color} {target_shape}")
+    print("📖 รูปทรงที่รองรับ:")
+    print("   - circle: วงกลม")
+    print("   - square: สี่เหลี่ยมจัตุรัส")
+    print("   - vertical_rectangle: สี่เหลี่ยมผืนผ้าแนวตั้ง")
+    print("   - horizontal_rectangle: สี่เหลี่ยมผืนผ้าแนวนอน")
+    print("กด 'q' เพื่อหยุดโปรแกรม")
     
     try:
+        # เชื่อมต่อ RoboMaster
+        ep_robot = robot.Robot()
+        ep_robot.initialize(conn_type="ap")
+        ep_camera = ep_robot.camera
+        ep_camera.start_video_stream(display=False, resolution=robot.camera.STREAM_720P)
+        
+        # ตั้งค่า detector
+        detector = CompactVisionDetector()
+        detector.set_target(target_color, target_shape)
+        
         while True:
             try:
-                frame = ep_camera.read_cv2_image(strategy="newest", timeout=1.0)
-                if frame is None:
-                    print("⚠️ ไม่สามารถอ่านเฟรมได้")
+                img = ep_camera.read_cv2_image(strategy="newest", timeout=1)
+                if img is None:
                     continue
-
-                detections = detector.detect(frame)
-                
-                # วาดผลการตรวจจับด้วยสีที่ถูกต้อง
-                for (cx, cy) in detections:
-                    cv2.circle(frame, (cx, cy), 20, display_color, 3)
-                    cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)  # จุดแดงตรงกลาง
-                    
-                    # แสดงชื่อรูปทรงแบบย่อ
-                    shape_name = target_shape
-                    if target_shape == "vertical_rectangle":
-                        shape_name = "V-Rect"
-                    elif target_shape == "horizontal_rectangle":
-                        shape_name = "H-Rect"
-                    elif target_shape == "square":
-                        shape_name = "Square"
-                    elif target_shape == "circle":
-                        shape_name = "Circle"
-                    
-                    cv2.putText(frame, shape_name, (cx-30, cy-30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, display_color, 2)
-                
-                # แสดงข้อมูล
-                cv2.putText(frame, f"Target: {target_color} {target_shape}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(frame, f"Found: {len(detections)} targets", (10, 60), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(frame, "Press ESC or Q to quit", (10, 90), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-                cv2.imshow("Compact Vision Detection Test", frame)
-                
-                # จำเป็นต้องมี waitKey เพื่อให้ imshow ทำงาน
-                key = cv2.waitKey(1) & 0xFF
-                if key == 27:  # ESC to quit
-                    print("🔄 กด ESC - ออกจากโปรแกรม")
-                    break
-                elif key == ord('q'):  # Q to quit
-                    print("🔄 กด Q - ออกจากโปรแกรม")
-                    break
-                
-                # แสดงผลในคอนโซลด้วย
-                if detections:
-                    print(f"✅ พบเป้าหมาย {len(detections)} ตำแหน่ง: {detections}")
-                else:
-                    print("🔍 กำลังค้นหาเป้าหมาย...")
-                
-
-            except Exception as e:
-                print(f"❌ ข้อผิดพลาดในการอ่านเฟรม: {e}")
-                time.sleep(0.1)
-
-    except KeyboardInterrupt:
-        print("\n⚠️ ยกเลิกการทดสอบโดยผู้ใช้")
+            except queue.Empty:
+                continue
+            
+            # ตรวจจับวัตถุ
+            detections = detector.detect(img)
+            
+            # วาดกรอบรอบวัตถุที่พบ
+            for (x, y) in detections:
+                cv2.rectangle(img, (x-30, y-30), (x+30, y+30), (0, 255, 0), 2)
+                cv2.putText(img, f"{target_shape}", (x-40, y-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            # แสดงข้อมูล
+            cv2.putText(img, f"Detecting: {target_color} {target_shape}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(img, f"Found: {len(detections)} objects", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(img, "Press 'q' to quit", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            cv2.imshow("RoboMaster Detection", img)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+    
+    except Exception as e:
+        print(f"❌ ข้อผิดพลาด: {e}")
     finally:
-        print("🔄 ปิดการเชื่อมต่อ...")
-        ep_camera.stop_video_stream()
-        ep.close()
-        cv2.destroyAllWindows()
-        print("✅ เสร็จสิ้น")
+        try:
+            ep_camera.stop_video_stream()
+            cv2.destroyAllWindows()
+            ep_robot.close()
+        except:
+            pass
+
+if __name__ == "__main__":
+    # ตัวอย่างการใช้งาน - เปลี่ยนรูปทรงได้ 4 แบบ
+    print("🎯 ตัวอย่างการใช้งานรูปทรงต่างๆ:")
+    print("1. วงกลมสีแดง: run_robomaster_detection('red', 'circle')")
+    print("2. สี่เหลี่ยมจัตุรัสสีเขียว: run_robomaster_detection('green', 'square')")
+    print("3. สี่เหลี่ยมผืนผ้าแนวตั้งสีน้ำเงิน: run_robomaster_detection('blue', 'vertical_rectangle')")
+    print("4. สี่เหลี่ยมผืนผ้าแนวนอนสีเหลือง: run_robomaster_detection('yellow', 'horizontal_rectangle')")
+    
+    # รันตัวอย่างพื้นฐาน - วงกลมสีแดง
+    run_robomaster_detection('blue', 'square')
