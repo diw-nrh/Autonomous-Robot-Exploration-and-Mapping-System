@@ -1,20 +1,19 @@
 """
-Compact Vision Detection for Project_2 with Object Tracking
-=========================================================
+Compact Vision Detection for Project_2
+=====================================
 ใช้สำหรับตรวจจับรูปทรงและสีในขั้นตอน scan หลังจากสแกนกำแพงเสร็จ
-พร้อมฟังก์ชัน gimbal tracking และการยิง
 """
 
 import cv2
 import numpy as np
 import time
 import math
+import time
 from robomaster import robot
-
 class CompactVisionDetector:
-    """ระบบตรวจจับรูปทรงและสีแบบย่อพร้อม object tracking"""
+    """ระบบตรวจจับรูปทรงและสีแบบย่อ"""
     
-    def __init__(self, ep=None):
+    def __init__(self):
         # กำหนดช่วงสี HSV และสีสำหรับการแสดงผล
         self.color_ranges = {
             "brown_red":      ([0, 150, 50],   [10, 255, 120],  (0, 0, 255)),
@@ -37,106 +36,16 @@ class CompactVisionDetector:
         
         self.target_color = None
         self.target_shape = None
-        self.ep = ep
-        
-        # การตั้งค่าสำหรับ object tracking
-        self.frame_width = 640
-        self.frame_height = 480
-        self.center_x = self.frame_width // 2
-        self.center_y = self.frame_height // 2
-        
-        # Dead zone (พื้นที่ที่ไม่ต้องขยับ gimbal)
-        self.dead_zone_x = 50  # ±50 pixels จากกลางแนวนอน
-        self.dead_zone_y = 30  # ±30 pixels จากกลางแนวตั้ง
-        
-        # ความเร็ว gimbal (ปรับได้)
-        self.gimbal_speed = 30  # degrees per second
     
     def set_target(self, color, shape):
         """ตั้งค่าเป้าหมาย"""
         self.target_color = color
         self.target_shape = shape
     
-    def calculate_gimbal_movement(self, target_x, target_y):
-        """คำนวณการเคลื่อนไหว gimbal ที่จำเป็น"""
-        # คำนวณระยะห่างจากจุดกลาง
-        dx = target_x - self.center_x
-        dy = target_y - self.center_y
-        
-        # ตรวจสอบ dead zone
-        if abs(dx) <= self.dead_zone_x and abs(dy) <= self.dead_zone_y:
-            return None, None  # อยู่ใน dead zone ไม่ต้องขยับ
-        
-        # แปลง pixel เป็น degrees (ปรับค่าตามความต้องการ)
-        # สมมติ FOV ประมาณ 60 degrees สำหรับ 640 pixels
-        degrees_per_pixel_x = 60.0 / self.frame_width
-        degrees_per_pixel_y = 45.0 / self.frame_height
-        
-        yaw_angle = -dx * degrees_per_pixel_x    # ลบเพราะ gimbal yaw ทำงานตรงกันข้าม
-        pitch_angle = dy * degrees_per_pixel_y   # บวกเพราะต้องการให้ pitch ขึ้นลงตามปกติ
-        
-        # จำกัดมุมการเคลื่อนไหว
-        yaw_angle = max(-10, min(10, yaw_angle))      # จำกัด ±10 degrees
-        pitch_angle = max(-5, min(5, pitch_angle))    # จำกัด ±5 degrees
-        
-        return yaw_angle, pitch_angle
-    
-    def track_object(self, target_x, target_y):
-        """หันหา gimbal ไปยังตำแหน่งวัตถุ"""
-        if not self.ep:
-            print("⚠️ ไม่มี robot instance สำหรับควบคุม gimbal")
-            return False
-        
-        try:
-            yaw_move, pitch_move = self.calculate_gimbal_movement(target_x, target_y)
-            
-            if yaw_move is None and pitch_move is None:
-                # อยู่ใน dead zone แล้ว
-                return True
-            
-            # ขยับ gimbal แบบ relative
-            self.ep.gimbal.move(pitch=pitch_move, yaw=yaw_move, pitch_speed=self.gimbal_speed, yaw_speed=self.gimbal_speed)
-            
-            print(f"🎯 Tracking: target({target_x}, {target_y}) -> gimbal(yaw:{yaw_move:.1f}°, pitch:{pitch_move:.1f}°)")
-            return True
-            
-        except Exception as e:
-            print(f"❌ ข้อผิดพลาดในการควบคุม gimbal: {e}")
-            return False
-    
-    def track_closest_object(self, detections):
-        """หันหาวัตถุที่ใกล้จุดกลางที่สุด"""
-        if not detections:
-            return False
-        
-        # หาวัตถุที่ใกล้จุดกลางที่สุด
-        closest_target = min(detections, key=lambda pos: 
-                           math.sqrt((pos[0] - self.center_x)**2 + (pos[1] - self.center_y)**2))
-        
-        return self.track_object(closest_target[0], closest_target[1])
-    
-    def reset_gimbal(self):
-        """รีเซ็ต gimbal กลับไปตำแหน่งกลาง"""
-        if not self.ep:
-            return False
-        
-        try:
-            self.ep.gimbal.recenter().wait_for_completed()
-            print("🔄 รีเซ็ต gimbal เรียบร้อย")
-            return True
-        except Exception as e:
-            print(f"❌ ข้อผิดพลาดในการรีเซ็ต gimbal: {e}")
-            return False
-    
     def detect(self, frame):
         """ตรวจจับเป้าหมาย - คืนค่า [(center_x, center_y), ...] หรือ []"""
         if not self.target_color or not self.target_shape:
             return []
-        
-        # อัปเดตขนาดเฟรม
-        self.frame_height, self.frame_width = frame.shape[:2]
-        self.center_x = self.frame_width // 2
-        self.center_y = self.frame_height // 2
         
         # แปลงชื่อสีเก่าเป็นใหม่ (ถ้าจำเป็น)
         color_key = self.target_color
@@ -178,14 +87,23 @@ class CompactVisionDetector:
             
             shape = None
             if vertices >= 8:
+                # ตรวจสอบความเป็นวงกลม
                 area = cv2.contourArea(cnt)
                 circularity = 4 * np.pi * area / (perimeter * perimeter)
                 if circularity > 0.7:
                     shape = 'circle'
-            elif vertices == 3:
-                shape = 'triangle'
             elif vertices == 4:
-                shape = 'rectangle'
+                # ใช้ bounding box เพื่อแยกประเภทสี่เหลี่ยม
+                x, y, w_box, h_box = cv2.boundingRect(cnt)
+                aspect_ratio = float(w_box) / h_box
+                
+                if 0.9 <= aspect_ratio <= 1.1:
+                    shape = 'square'  # สี่เหลี่ยมจัตุรัส
+                elif aspect_ratio > 1.3:
+                    shape = 'horizontal_rectangle'  # สี่เหลี่ยมผืนผ้าแนวนอน (กว้างมากกว่าสูง)
+                elif aspect_ratio < 0.7:
+                    shape = 'vertical_rectangle'  # สี่เหลี่ยมผืนผ้าแนวตั้ง (สูงมากกว่ากว้าง)
+                # ไม่มี else เพราะไม่ต้องการรูปทรงอื่นๆ
             
             if shape == self.target_shape:
                 x, y, w_box, h_box = cv2.boundingRect(cnt)
@@ -194,15 +112,6 @@ class CompactVisionDetector:
                 results.append((center_x, center_y))
         
         return results
-    
-    def detect_and_track(self, frame, auto_track=True):
-        """ตรวจจับและหันตามวัตถุ (ถ้า auto_track=True)"""
-        detections = self.detect(frame)
-        
-        if auto_track and detections:
-            self.track_closest_object(detections)
-        
-        return detections
     
     def get_display_color(self):
         """ได้สีสำหรับการแสดงผลตามเป้าหมายปัจจุบัน"""
@@ -231,103 +140,42 @@ class CompactVisionDetector:
         }
 
 
-def test_gimbal_movement(ep):
-    """ทดสอบการทำงานของ gimbal"""
-    try:
-        print("🔧 ทดสอบ gimbal...")
-        ep.gimbal.recenter().wait_for_completed()
-        time.sleep(0.5)
-        ep.gimbal.move(yaw=10, pitch=0, yaw_speed=30).wait_for_completed()
-        time.sleep(0.5)
-        ep.gimbal.recenter().wait_for_completed()
-        print("✅ Gimbal ทำงานปกติ")
-        return True
-    except Exception as e:
-        print(f"❌ Gimbal ไม่ทำงาน: {e}")
-        return False
-
-
-def shoot_target_with_gimbal(ep, ep_camera, target_color, target_shape):
-    """ยิงเป้าหมายด้วยการใช้ gimbal tracking"""
-    try:
-        # สร้าง detector สำหรับการยิง
-        detector = CompactVisionDetector(ep=ep)
-        detector.set_target(target_color, target_shape)
-        
-        print(f"🎯 เริ่มการยิง {target_color} {target_shape}")
-        
-        # ลองหาเป้าหมายและหันหา 3 ครั้ง
-        for attempt in range(3):
-            frame = ep_camera.read_cv2_image(strategy="newest", timeout=1.0)
-            if frame is None:
-                continue
-                
-            detections = detector.detect_and_track(frame, auto_track=True)
-            
-            if detections:
-                # รอให้ gimbal หยุดนิ่ง
-                time.sleep(0.5)
-                
-                # ยิง!
-                ep.blaster.fire(fire_type="infrared", times=1)
-                print(f"🔥 ยิงครั้งที่ {attempt + 1}")
-                time.sleep(0.3)
-                
-                return True
-            
-            time.sleep(0.2)
-        
-        print("❌ ไม่พบเป้าหมายสำหรับการยิง")
-        return False
-        
-    except Exception as e:
-        print(f"❌ ข้อผิดพลาดในการยิง: {e}")
-        return False
-
-
 if __name__ == "__main__":
-    # Example test code for detection and tracking using RoboMaster camera
+    # Example test code for detection using RoboMaster camera
     ep = robot.Robot()
-    ep.initialize(conn_type="ap")  # เชื่อมต่อแบบ station mode
+    ep.initialize(conn_type="ap")  # เชื่อมต่อแบบ station mode (ปรับตามการเชื่อนต่อของคุณ)
     ep_camera = ep.camera
     ep_camera.start_video_stream(display=False)
     
     # ทดสอบ gimbal ก่อน
     print("🔧 ทดสอบระบบ gimbal...")
-    gimbal_ok = test_gimbal_movement(ep)
     
-    if not gimbal_ok:
-        print("❌ gimbal ไม่ทำงาน - ตรวจสอบการเชื่อมต่อ")
-        ep_camera.stop_video_stream()
-        ep.close()
-        exit(1)
+
     
-    # สร้าง detector พร้อม robot instance
-    detector = CompactVisionDetector(ep=ep)
+    detector = CompactVisionDetector()
     
     # แสดงสีที่ใช้งานได้
     available_colors = detector.get_available_colors()
     print("🎨 สีที่ใช้งานได้:")
     print(f"  สีใหม่: {available_colors['new']}")
     print(f"  สีเก่า (legacy): {available_colors['legacy']}")
+    print("📐 รูปทรงที่รองรับ (4 รูปแบบ):")
+    print("  • circle - วงกลม")
+    print("  • square - สี่เหลี่ยมจัตุรัส")
+    print("  • vertical_rectangle - สี่เหลี่ยมผืนผ้าแนวตั้ง")
+    print("  • horizontal_rectangle - สี่เหลี่ยมผืนผ้าแนวนอน")
     
     # ตั้งค่าเป้าหมาย - ลองใช้สีใหม่
     target_color = "dark_green"  # เปลี่ยนได้: brown_red, dark_green, yellow_brown, dark_blue, dark_purple_red, vivid_dark_red
-    target_shape = "circle"       # หรือ rectangle, triangle
+    target_shape = "circle"       # รูปทรงที่รองรับ: circle, square, vertical_rectangle, horizontal_rectangle
     
     detector.set_target(target_color, target_shape)
     display_color = detector.get_display_color()
 
-    print(f"🎥 เริ่มทดสอบการตรวจจับและหันตาม - กด ESC เพื่อออก")
+    print(f"🎥 เริ่มทดสอบการตรวจจับ - กด ESC หรือ Q เพื่อออก")
     print(f"🎯 กำลังหา: {target_color} {target_shape}")
     print(f"🌈 สีแสดงผล: {display_color}")
-    print("📋 คำสั่ง:")
-    print("  - SPACE: ยิงเป้าหมาย")
-    print("  - T: เปิด/ปิด auto tracking")
-    print("  - R: รีเซ็ต gimbal")
-    print("  - ESC: ออก")
-    
-    auto_tracking = True  # เปิด auto tracking ตั้งแต่เริ่มต้น
+    print("💡 หน้าต่างกล้องจะเปิดขึ้นมา กด ESC หรือ Q เพื่อปิด")
     
     try:
         while True:
@@ -337,60 +185,52 @@ if __name__ == "__main__":
                     print("⚠️ ไม่สามารถอ่านเฟรมได้")
                     continue
 
-                # ตรวจจับและหันตาม (ถ้าเปิด auto tracking)
-                detections = detector.detect_and_track(frame, auto_track=auto_tracking)
+                detections = detector.detect(frame)
                 
-                # วาดผลการตรวจจับ
+                # วาดผลการตรวจจับด้วยสีที่ถูกต้อง
                 for (cx, cy) in detections:
                     cv2.circle(frame, (cx, cy), 20, display_color, 3)
                     cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)  # จุดแดงตรงกลาง
-                    cv2.putText(frame, "TARGET", (cx-30, cy-30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, display_color, 2)
-                
-                # วาดจุดกลางและ dead zone
-                cv2.circle(frame, (detector.center_x, detector.center_y), 5, (255, 255, 255), -1)
-                cv2.rectangle(frame, 
-                            (detector.center_x - detector.dead_zone_x, detector.center_y - detector.dead_zone_y),
-                            (detector.center_x + detector.dead_zone_x, detector.center_y + detector.dead_zone_y),
-                            (128, 128, 128), 1)
+                    
+                    # แสดงชื่อรูปทรงแบบย่อ
+                    shape_name = target_shape
+                    if target_shape == "vertical_rectangle":
+                        shape_name = "V-Rect"
+                    elif target_shape == "horizontal_rectangle":
+                        shape_name = "H-Rect"
+                    elif target_shape == "square":
+                        shape_name = "Square"
+                    elif target_shape == "circle":
+                        shape_name = "Circle"
+                    
+                    cv2.putText(frame, shape_name, (cx-30, cy-30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, display_color, 2)
                 
                 # แสดงข้อมูล
                 cv2.putText(frame, f"Target: {target_color} {target_shape}", (10, 30), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 cv2.putText(frame, f"Found: {len(detections)} targets", (10, 60), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(frame, f"Auto Tracking: {'ON' if auto_tracking else 'OFF'}", (10, 90), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if auto_tracking else (0, 0, 255), 2)
-                cv2.putText(frame, "ESC:quit | SPACE:shoot | T:tracking | R:reset", (10, 120), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(frame, "Press ESC or Q to quit", (10, 90), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-                cv2.imshow("Compact Vision Detection with Tracking", frame)
+                cv2.imshow("Compact Vision Detection Test", frame)
+                
+                # จำเป็นต้องมี waitKey เพื่อให้ imshow ทำงาน
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:  # ESC to quit
+                    print("🔄 กด ESC - ออกจากโปรแกรม")
+                    break
+                elif key == ord('q'):  # Q to quit
+                    print("🔄 กด Q - ออกจากโปรแกรม")
+                    break
                 
                 # แสดงผลในคอนโซลด้วย
                 if detections:
-                    closest = min(detections, key=lambda pos: 
-                                math.sqrt((pos[0] - detector.center_x)**2 + (pos[1] - detector.center_y)**2))
-                    print(f"✅ พบเป้าหมาย {len(detections)} ตำแหน่ง | ใกล้ที่สุด: {closest}")
+                    print(f"✅ พบเป้าหมาย {len(detections)} ตำแหน่ง: {detections}")
+                else:
+                    print("🔍 กำลังค้นหาเป้าหมาย...")
                 
-                key = cv2.waitKey(1) & 0xFF
-                if key == 27:  # ESC to quit
-                    break
-                elif key == 32:  # SPACE to shoot
-                    if detections:
-                        print("🎯 เริ่มการยิง!")
-                        success = shoot_target_with_gimbal(ep, ep_camera, target_color, target_shape)
-                        if success:
-                            print("✅ ยิงสำเร็จ!")
-                        else:
-                            print("❌ ยิงไม่สำเร็จ!")
-                    else:
-                        print("⚠️ ไม่พบเป้าหมาย - ไม่สามารถยิงได้")
-                elif key == ord('t') or key == ord('T'):  # T to toggle auto tracking
-                    auto_tracking = not auto_tracking
-                    print(f"🔄 Auto tracking: {'เปิด' if auto_tracking else 'ปิด'}")
-                elif key == ord('r') or key == ord('R'):  # R to reset gimbal
-                    print("🔄 รีเซ็ต gimbal...")
-                    detector.reset_gimbal()
-                    
+
             except Exception as e:
                 print(f"❌ ข้อผิดพลาดในการอ่านเฟรม: {e}")
                 time.sleep(0.1)
@@ -398,8 +238,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n⚠️ ยกเลิกการทดสอบโดยผู้ใช้")
     finally:
-        print("🔄 รีเซ็ต gimbal และปิดการเชื่อมต่อ...")
-        detector.reset_gimbal()
+        print("🔄 ปิดการเชื่อมต่อ...")
         ep_camera.stop_video_stream()
         ep.close()
         cv2.destroyAllWindows()
