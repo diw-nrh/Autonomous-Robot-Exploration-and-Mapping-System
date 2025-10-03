@@ -1,5 +1,21 @@
 from robomaster import robot
 import time
+import threading
+
+# shared ToF state (module-level so callback and main can see it)
+latest_tof = None
+lock = threading.Lock()
+
+
+def tof_cb(sub_info):
+    # sub_info มักเป็น list/tuple เช่น [distance_cm]
+    try:
+        v = sub_info[0]
+    except Exception:
+        v = None
+    with lock:
+        global latest_tof
+        latest_tof = v
 
 def adc_to_distance_left(adc_value):
     """
@@ -96,24 +112,29 @@ def adc_to_distance(adc_value):
 
 # 0 = True (มีผนัง), 1 = False (ไม่มีผนัง)
 
-
+def Set_the_wall(ir_left, ir_right, distance_left, distance_right, threshold=150,tof_val=None):
+    return
+        
 if __name__ == "__main__":
     ep = robot.Robot()
     ep.initialize(conn_type="ap")
     ep_adaptor = ep.sensor_adaptor
 
-    print("🔬 Sharp Sensor Distance Testing")
-    print("=" * 40)
-    print("ADC -> Distance conversion active")
-    print("Press Ctrl+C to exit")
-    print()
+    # Directly subscribe to ToF (assume SDK method exists)
+    ep.sensor.sub_distance(freq=10, callback=tof_cb)
 
     try:
         while True:
+            # อ่านค่า ToF
+            with lock:
+                tof_val = latest_tof
             # อ่านค่า ADC
             sharp_left_adc = ep_adaptor.get_adc(id=1, port=2)   # Left sensor
             sharp_right_adc = ep_adaptor.get_adc(id=2, port=1)  # Right sensor
 
+            # อ่าค่า IR sensor I/O
+            ir_left = ep_adaptor.get_io(id=1, port=1)   # Left sensor
+            ir_right = ep_adaptor.get_io(id=2, port=2)  # Right sensor
             # แปลงเป็น distance (mm)
             distance_left = adc_to_distance_left(sharp_left_adc)
             distance_right = adc_to_distance_right(sharp_right_adc)
@@ -121,14 +142,34 @@ if __name__ == "__main__":
             # แสดงผล
             print(f"Left  - ADC: {sharp_left_adc:4d} → {distance_left:6.1f} mm")
             print(f"Right - ADC: {sharp_right_adc:4d} → {distance_right:6.1f} mm")
+            print(f"IR Left: (IO: {ir_left})")
+            print(f"IR Right:(IO: {ir_right})")
+            print(f"[main] Latest ToF: {tof_val if tof_val is not None else 'N/A'} cm  ,")
             print("-" * 30)
             
             time.sleep(0.2)  # หน่วงเวลา 200ms
 
     except KeyboardInterrupt:
+        try:
+            ep.sensor.unsub_distance()
+        except Exception:
+            pass
+        ep.close()
         print("\n🛑 Stopping sensor test...")
     except Exception as e:
+        try:
+            ep.sensor.unsub_distance()
+        except Exception:
+            pass
+        ep.close()
         print(f"❌ Error: {e}")
     finally:
-        ep.close()
+        try:
+            ep.sensor.unsub_distance()
+        except Exception:
+            pass
+        try:
+            ep.close()
+        except Exception:
+            pass
         print("✅ Robot disconnected safely")
