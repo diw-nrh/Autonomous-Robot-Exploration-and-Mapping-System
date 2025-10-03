@@ -102,18 +102,15 @@ if __name__ == "__main__":
     ep.initialize(conn_type="ap")
     ep_adaptor = ep.sensor_adaptor
 
-    print("🔬 Sharp Sensor Distance Testing")
-    print("=" * 40)
-    print("ADC -> Distance conversion active")
-    print("Press Ctrl+C to exit")
-    print()
-
     try:
         while True:
             # อ่านค่า ADC
             sharp_left_adc = ep_adaptor.get_adc(id=1, port=2)   # Left sensor
             sharp_right_adc = ep_adaptor.get_adc(id=2, port=1)  # Right sensor
 
+            # อ่าค่า IR sensor I/O
+            ir_left = ep_adaptor.get_io(id=1, port=1)   # Left sensor
+            ir_right = ep_adaptor.get_io(id=2, port=2)  # Right sensor
             # แปลงเป็น distance (mm)
             distance_left = adc_to_distance_left(sharp_left_adc)
             distance_right = adc_to_distance_right(sharp_right_adc)
@@ -121,6 +118,8 @@ if __name__ == "__main__":
             # แสดงผล
             print(f"Left  - ADC: {sharp_left_adc:4d} → {distance_left:6.1f} mm")
             print(f"Right - ADC: {sharp_right_adc:4d} → {distance_right:6.1f} mm")
+            print(f"IR Left: (IO: {ir_left})")
+            print(f"IR Right:(IO: {ir_right})")
             print("-" * 30)
             
             time.sleep(0.2)  # หน่วงเวลา 200ms
