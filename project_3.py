@@ -40,7 +40,44 @@ from robomaster import robot, vision
 import matplotlib.pyplot as plt
 
 # Compact Vision Detection
-from compact_vision import quick_target_check, scan_for_targets
+from compact_vision import CompactVisionDetector
+
+# Helper functions for compact vision
+def quick_target_check(camera, color='red', shape='circle'):
+    """ตรวจสอบเป้าหมายอย่างรวดเร็ว (1 เฟรม)"""
+    detector = CompactVisionDetector()
+    detector.set_target(color, shape)
+    
+    try:
+        frame = camera.read_cv2_image(strategy="newest", timeout=1.0)
+        if frame is not None:
+            detections = detector.detect(frame)
+            return len(detections) > 0
+    except:
+        pass
+    
+    return False
+
+def scan_for_targets(camera, color='red', shape='circle', duration=2.0):
+    """สแกนหาเป้าหมายด้วยกล้อง"""
+    detector = CompactVisionDetector()
+    detector.set_target(color, shape)
+    
+    import time
+    start_time = time.time()
+    all_detections = []
+    
+    while time.time() - start_time < duration:
+        try:
+            frame = camera.read_cv2_image(strategy="newest", timeout=0.5)
+            if frame is not None:
+                detections = detector.detect(frame)
+                all_detections.extend(detections)
+        except:
+            pass
+        time.sleep(0.1)
+    
+    return all_detections
 
 
 # =============================================================================
