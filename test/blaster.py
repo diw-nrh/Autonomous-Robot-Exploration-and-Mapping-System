@@ -22,12 +22,13 @@ from robomaster import blaster
 if __name__ == '__main__':
     ep_robot = robot.Robot()
     ep_robot.initialize(conn_type="ap")
-
+    ep_robot.gimbal.move(yaw=0,pitch=-10)
     ep_blaster = ep_robot.blaster
 
     # 发射1颗水弹
-    ep_blaster.fire(times=1)
-    time.sleep(2)
+    while True:
+        ep_blaster.fire(times=20)
+        time.sleep(1)
 
 
     ep_robot.close()

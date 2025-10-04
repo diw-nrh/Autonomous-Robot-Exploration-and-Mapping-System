@@ -319,7 +319,7 @@ class MazeExplorer:
         self.pose_handler = pose_handler
         self.last_time = time.monotonic()
         # Navigation state
-        self.shoot_grid = [] # [((x, y), orientation, color, shape)]
+        self.shoot_grid = []
         self.visited_for_check = []
         self.current_position = (0, 0)
         self.current_orientation = 0  # 0:N, 1:E, 2:S, 3:W
@@ -351,7 +351,11 @@ class MazeExplorer:
         self.wall_log = set()   # กำแพงที่พบ
         self.path_log = []      # เส้นทางที่เดิน
         self.continuous_sensor_log = []  # บันทึกเซ็นเซอร์ต่อเนื่อง
-        
+
+        self.detected_targets = []        # list ของเป้าหมายที่เจอ/ยิง
+        self.targets_json_path = None     # path ไฟล์ targets_*.json
+        self.map_state_json_path = None   # path ไฟล์ map_state_*.json
+
         # Logging thread
         self._logging_thread = None
         self._logging_thread_active = False
@@ -393,7 +397,7 @@ class MazeExplorer:
         if aim_grid not in self.shoot_grid:
             pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
             pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
-            self.ep_gimbal.recenter().wait_for_completed()
+            self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
             tof_dist = self.tof_handler.get_distance()
             self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
             center_x = center_y = None
@@ -527,30 +531,27 @@ class MazeExplorer:
                         time.sleep(1)
                         self.ep_blaster.fire(times=3)
                         time.sleep(1)
+                        self.record_target_hit(self.target_color, self.target_shape)  # NEW
                         self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
-                        self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
+                        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
                         cv2.destroyAllWindows()
                         self.shoot_grid.append((self.current_position, self.current_orientation, self.target_color, self.target_shape,))
                         break
 
-                elif center_x is not None and center_y is not None and time.monotonic() - timebefore < 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
+                elif center_x is None and center_y is None and time.monotonic() - timebefore < 10.0 and have_object and tof_dist < 1000 and tof_dist > 300:
                     self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
                     pid_yaw.integ *= 0.9
                     pid_pitch.integ *= 0.9
-                elif center_x is None and center_y is None and time.monotonic() - timebefore > 5.0 and not have_object and tof_dist < 1000 and tof_dist>300:
-                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
+                elif center_x is None and center_y is None and time.monotonic() - timebefore > 3.0 and not have_object and tof_dist < 1000 and tof_dist > 300:
+                    self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
-                elif time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
-                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
+                elif time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist > 300:
+                    self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
-                elif tof_dist > 1000 or tof_dist<300:
-                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
-                    cv2.destroyAllWindows()
-                    break
-                elif center_x is not None and center_y is not None and time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
-                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
+                elif tof_dist > 1000 or tof_dist < 300:
+                    self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
                 # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
@@ -817,7 +818,7 @@ class MazeExplorer:
                 self.wall_log.add(tuple(sorted([self.current_position, neighbor_pos])))
 
         # รีเซ็นเตอร์กิมบอล
-        self.ep_gimbal.moveto(yaw=0, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         print("Scan complete using ToF and IR sensors.")
 
         self._save_scan_results(wall_distances)
@@ -837,6 +838,81 @@ class MazeExplorer:
             "S_mm": wall_distances.get('2', None),
             "W_mm": wall_distances.get('3', None)
         })
+    # -------------------- NEW: Target & Map JSON helpers --------------------
+    def record_target_hit(self, color, shape):
+        """บันทึกเหตุการณ์พบ/ยิงเป้าหมาย ณ กริดปัจจุบัน"""
+        gx, gy = self.current_position
+        x_m = gx * GRID_SIZE_M
+        y_m = gy * GRID_SIZE_M
+        _, _, _, yaw_deg, _, _ = self.pose_handler.get_pose()
+        self.detected_targets.append({
+            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "color": color,
+            "shape": shape,
+            "grid": {"x": gx, "y": gy},
+            "orientation": int(self.current_orientation),     # 0=N,1=E,2=S,3=W
+            "orientation_name": ORIENTATIONS.get(self.current_orientation, "?")
+        })
+
+    def save_targets_json(self):
+        """เซฟไฟล์ JSON ของเป้าหมายที่บันทึก"""
+        if not self.detected_targets:
+            print("[JSON] No targets to save.")
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.targets_json_path = f"targets_run1_{ts}.json"
+        payload = {
+            "meta": {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "grid_size_m": GRID_SIZE_M
+            },
+            "targets": self.detected_targets
+        }
+        try:
+            with open(self.targets_json_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            print(f"[JSON] Targets saved → {self.targets_json_path}")
+        except Exception as e:
+            print(f"[JSON] Error saving targets: {e}")
+
+    def save_map_state_json(self):
+        """เซฟกราฟ/กำแพง/พื้นที่ที่สำรวจ/เส้นทาง สำหรับ Lap2"""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.map_state_json_path = f"map_state_run1_{ts}.json"
+
+        # แปลง graph (set/tuple) ให้อยู่ในรูปที่ serialize ได้
+        graph_json = {f"{k[0]},{k[1]}": [[n[0], n[1]] for n in v]
+                      for k, v in self.internal_map.graph.items()}
+        blocked_json = [[[a[0], a[1]], [b[0], b[1]]]
+                        for (a, b) in sorted(self.internal_map.blocked)]
+        explored_json = [[p[0], p[1]] for p in sorted(self.internal_map.explored)]
+        visited_json = [[p[0], p[1]] for p in self.visited_path]
+
+        gx, gy = self.current_position
+        final_world = {"x": gx * GRID_SIZE_M, "y": gy * GRID_SIZE_M}
+
+        payload = {
+            "meta": {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "grid_size_m": GRID_SIZE_M,
+                "border": {"w": self.border[0], "h": self.border[1]},
+                # เปลี่ยนจาก final_yaw → final_orientation (ตามที่เคยบอก)
+                "final_orientation": int(self.current_orientation),
+                "final_orientation_name": ORIENTATIONS.get(self.current_orientation, "?"),
+                "final_position_grid": {"x": gx, "y": gy},
+            },
+            "graph": graph_json,
+            "blocked": blocked_json,
+            "explored": explored_json,
+            "visited_path": visited_json
+        }
+
+        try:
+            with open(self.map_state_json_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            print(f"[JSON] Map state saved → {self.map_state_json_path}")
+        except Exception as e:
+            print(f"[JSON] Error saving map state: {e}")
 
     # ========================================================================
     # Navigation Functions
@@ -991,22 +1067,22 @@ class MazeExplorer:
         # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
         if front_distance_mm < WALL_THRESHOLD_MM:
             move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
-            if abs(move_dist_m) > 0.025:
-                self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=1).wait_for_completed()
         if wall_left:
             move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m
-            if abs(move_dist_m) > 0.025:
-                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=1).wait_for_completed()
         elif wall_right:
             move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m
-            if abs(move_dist_m) > 0.025:
-                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=1).wait_for_completed()
 
     # ========================================================================
     # Movement and PID Control Functions
     # ========================================================================
     
-    def move_forward_pid(self, distance_m, speed_limit=0.5):
+    def move_forward_pid(self, distance_m, speed_limit=0.6):
         """
         ใช้ PID controller เพื่อเคลื่อนที่ไปข้างหน้าระยะทางที่กำหนด
         
@@ -1028,7 +1104,7 @@ class MazeExplorer:
             self.ep_chassis.drive_speed(x=vx_speed, y=0, z=0, timeout=0.1)
             time.sleep(0.01)
 
-        self.ep_chassis.drive_speed(0, 0, 0)
+        self.ep_chassis.drive_speed(0, 0, 0 , timeout=0.1)
         print("   PID Move: Completed.")
 
         gx, gy = self.current_position
@@ -1038,7 +1114,7 @@ class MazeExplorer:
             "grid_x": gx, "grid_y": gy, "yaw": yaw
         })
 
-    def turn_pid(self, target_angle, speed_limit=90):
+    def turn_pid(self, target_angle, speed_limit=360):
         """
         ใช้ PID controller เพื่อหมุนไปยังมุมที่กำหนด
         
@@ -1053,12 +1129,14 @@ class MazeExplorer:
             error = target_angle - current_yaw
             if error > 180: error -= 360
             if error < -180: error += 360
-            if abs(error) < 1.5: break
+            if abs(error) < 1.5: 
+                self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
+                break
             vz_speed = pid.update(-error)
             self.ep_chassis.drive_speed(x=0, y=0, z=vz_speed, timeout=0.1)
             time.sleep(0.01)
-        self.ep_gimbal.moveto(yaw=0, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-        self.ep_chassis.drive_speed(0, 0, 0)
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
         print("   PID Turn: Completed.")
 
     def execute_path(self, path):
@@ -1089,14 +1167,17 @@ class MazeExplorer:
             elif target_orientation == 2: target_angle = 180
             elif target_orientation == 3: target_angle = -90
             self.detect_and_shot()
+            before_orientation = self.current_orientation
             self.turn_pid(target_angle)
             self.current_orientation = target_orientation
-            self.detect_and_shot()
+            if before_orientation != self.current_orientation:
+                self.detect_and_shot()
+            self.turn_pid(target_angle)
             time.sleep(0.2)
             self.move_forward_pid(GRID_SIZE_M)
             self.current_position = end_node
             self.visited_path.append(self.current_position)
-
+    
             self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
             self.pose_handler.set_yaw(target_angle)
             time.sleep(0.2)
@@ -1113,8 +1194,8 @@ class MazeExplorer:
         2. แสดงแผนที่แบบ real-time
         3. บันทึกข้อมูลเซ็นเซอร์และเส้นทาง
         """
-        self.ep_gimbal.moveto(yaw=0, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
         # เริ่มต้น real-time plotting
         self.init_real_time_plot()
         self.update_real_time_plot()  # แสดงแผนที่เริ่มต้น
@@ -1130,7 +1211,7 @@ class MazeExplorer:
         """
         self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-        self.set_target('red', 'horizontal_rectangle')
+        self.set_target('red', 'vertical_rectangle')
         while True:
             self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
             
@@ -1150,6 +1231,9 @@ class MazeExplorer:
             self.execute_path(path_to_execute)
             # อัปเดตแผนที่หลังเคลื่อนที่
             self.update_real_time_plot()
+
+        self.save_targets_json()
+        self.save_map_state_json()
 
         print("\n--- Final Marker Map ---")
 

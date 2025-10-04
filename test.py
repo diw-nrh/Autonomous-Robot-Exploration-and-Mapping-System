@@ -1,7 +1,10 @@
+SHOW_DEBUG = False
 """
 =================================================================================
 LAB 1: MAZE EXPLORATION ROBOT
 =================================================================================
+Description: หุ่นยนต์สำรวจเขาวงกต โดยใช้ ToF sensor ด้านหน้า และ IR sensors ด้านข้าง
+            เฉพาะการสำรวจทั้งหมด ไม่มี goal
 
 Features:
 - ToF sensor สำหรับวัดระยะด้านหน้า
@@ -9,12 +12,21 @@ Features:
 - Real-time mapping แสดงแผนที่ขณะสำรวจ
 - Complete maze exploration only
 - CSV logging และ state saving/loading
+
+Hardware Requirements:
+- RoboMaster EP/S1
+- ToF sensor (built-in)
+- IR digital sensors x2 (port 1: ซ้าย, port 2: ขวา)
+
+Author: [Your Name]
+Date: October 2025
 =================================================================================
 """
 
 # =============================================================================
 # IMPORTS AND DEPENDENCIES
 # =============================================================================
+from robomaster import blaster
 import time
 import threading
 import math
@@ -25,14 +37,13 @@ import json
 import os
 import sys
 import statistics
-
+import cv2
 import robomaster
 from robomaster import robot, vision
-
+import queue
 # Matplotlib for real-time plotting and map visualization
 import matplotlib.pyplot as plt
-
-from project_3 import VisionDataHandler
+import numpy as np
 
 # =============================================================================
 # CONFIGURATION AND CONSTANTS
@@ -41,11 +52,12 @@ from project_3 import VisionDataHandler
 # Robot Movement and Grid Settings
 GRID_SIZE_M = 0.635                    # ขนาดกริดเป็นเมตร
 WALL_THRESHOLD_MM = 450                # เกณฑ์ระยะทางที่ถือว่ามีกำแพง (มม.)
-START = (0, 0)                           # ตำแหน่งเริ่มต้น (กริด)
+
 # Gimbal and Vision Settings
 GIMBAL_TURN_SPEED = 360                # ความเร็วหมุนกิมบอล (องศา/วินาที)
+CAMERA_HORIZONTAL_FOV = 96             # มุมมองกล้องแนวนอน (องศา)
 VISION_SCAN_DURATION_S = 1             # ระยะเวลาสแกน vision (วินาที)
-BORDER = (4, 5)                        # ขนาดพื้นที่สำรวจ (กริด)
+
 # Direction Mappings
 ORIENTATIONS = {
     0: "North", 
@@ -60,9 +72,6 @@ WALL_NAMES = {
     2: "South Wall", 
     3: "West Wall"
 }
-
-
-
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -84,7 +93,26 @@ def sub_angle(a_deg: float, b_deg: float) -> float:
 # =============================================================================
 # DATA HANDLERS AND SENSOR MANAGEMENT
 # =============================================================================
+class PID:
+    def __init__(self, kp=0.2, ki=0.0, kd=0.0, integ_clip=40.0, out_clip=10.0):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.integ = 0.0
+        self.prev_err = 0.0
+        self.integ_clip = float(integ_clip)
+        self.out_clip = float(out_clip)
+    def reset(self):
+        self.integ = 0.0; self.prev_err = 0.0
+    def step(self, err, dt):
+        dt = max(dt, 1e-3)
+        self.integ += err * dt
+        self.integ = max(-self.integ_clip, min(self.integ, self.integ_clip))
+        deriv = (err - self.prev_err) / dt
+        self.prev_err = err
+        out = self.kp*err + self.ki*self.integ + self.kd*deriv
+        return max(-self.out_clip, min(self.out_clip, out))
 
+
+                
 class TofDataHandler:
     """จัดการข้อมูลจาก ToF sensor ด้วย median filtering"""
     
@@ -108,9 +136,9 @@ class TofDataHandler:
             return self._median if self._window else self.raw_distance
 
     def get_raw_distance(self):
-        """คืนค่า ToF ดิบ"""
         with self._lock:
             return self.raw_distance
+
 
 class GimbalDataHandler:
     """จัดการข้อมูลมุมกิมบอล (yaw, pitch)"""
@@ -220,6 +248,7 @@ class RobotMap:
         return None
 
 
+
 class PIDController:
     """ตัวควบคุม PID สำหรับการเคลื่อนที่"""
     
@@ -281,21 +310,24 @@ class MazeExplorer:
         self.ep_led = ep_robot.led
         self.ep_gimbal = ep_robot.gimbal
         self.ep_adaptor = ep_robot.sensor_adaptor
-        
+        self.ep_camera = ep_robot.camera
+        self.blaster = blaster
+        self.ep_blaster = ep_robot.blaster
         # Data handlers
         self.tof_handler = tof_handler
         self.gimbal_handler = gimbal_handler
         self.pose_handler = pose_handler
-        
+        self.last_time = time.monotonic()
         # Navigation state
+        self.shoot_grid = []
         self.visited_for_check = []
-        self.current_position = START
+        self.current_position = (0, 0)
         self.current_orientation = 0  # 0:N, 1:E, 2:S, 3:W
         self.internal_map = RobotMap()
         self.visited_path = [self.current_position]
         
         # Exploration settings
-        self.border = BORDER  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (4, 4)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
         # Exploration settings
@@ -319,13 +351,213 @@ class MazeExplorer:
         self.wall_log = set()   # กำแพงที่พบ
         self.path_log = []      # เส้นทางที่เดิน
         self.continuous_sensor_log = []  # บันทึกเซ็นเซอร์ต่อเนื่อง
-        
-        self.detected_objects = []  # [{type, grid:[x,y], wall:"N|E|S|W"|None, offset_m:float, ts:str}]
-        
+
+        self.detected_targets = []        # list ของเป้าหมายที่เจอ/ยิง
+        self.targets_json_path = None     # path ไฟล์ targets_*.json
+        self.map_state_json_path = None   # path ไฟล์ map_state_*.json
+
         # Logging thread
         self._logging_thread = None
         self._logging_thread_active = False
+       
+        self.ep_robot = ep_robot
+        self.ep_camera = ep_robot.camera
+        self.ep_gimbal = ep_robot.gimbal
+        self.ep_blaster = ep_robot.blaster
+        self.last_time = time.monotonic()
+        
+        # Color ranges (HSV)
+        self.color_ranges = {
+            'brown_red': ([0, 120, 70], [25, 255, 255]),
+            'dark_green': ([60, 40, 40], [95, 255, 255]),
+            'yellow_brown': ([15, 100, 100], [25, 255, 255]),
+            'dark_blue': ([90, 60, 20], [150, 255, 255])
+        }
+        
+        
+        # Color mapping
+        self.colors = {
+            'red': "brown_red",
+            'green': "dark_green", 
+            'yellow': "yellow_brown",
+            'blue': "dark_blue",
+        }
+        
+        self.target_color = None
+        self.target_shape = None
+    
+    def set_target(self, color, shape):
+        """ตั้งค่าเป้าหมาย"""
+        self.target_color = color
+        self.target_shape = shape
 
+    def detect_and_shot(self):
+        aim_grid = (self.current_position, self.current_orientation, self.target_color, self.target_shape)
+        if aim_grid not in self.shoot_grid:
+            pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
+            pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
+            self.ep_gimbal.recenter().wait_for_completed()
+            tof_dist = self.tof_handler.get_distance()
+            self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+            center_x = center_y = None
+            err_x = err_y = 0.0
+            yaw_cmd = pitch_cmd = 0.0
+            # ensure camera stream is running
+            have_object = False  # เพิ่มการประกาศตัวแปร
+            time.sleep(0.5)
+            timebefore = time.monotonic()
+        
+            while True:
+                try:
+                    img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
+                    if img is None:
+                        continue
+                except queue.Empty:
+                    continue
+                # แปลงชื่อสีเก่าเป็นใหม่ (ถ้าจำเป็น)
+                color_key = self.target_color
+                if self.target_color in self.colors:
+                    color_key = self.colors[self.target_color]
+                
+                # ตรวจสอบว่ามีสีที่ต้องการหรือไม่
+                if color_key not in self.color_ranges:
+                    print(f"⚠️ ไม่พบสี '{self.target_color}' ในระบบ")
+                    return []
+                # ROI (กลางภาพ)
+                h, w = img.shape[:2]
+                roi_w, roi_h = min(800, w), min(450, h)
+                roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
+                roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+                
+                # แปลง HSV และสร้าง mask (เพิ่มการเบลอ + morphology เพื่อลด noise)
+                blur = cv2.GaussianBlur(roi, (5, 5), 0)
+                hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+                color_data = self.color_ranges[color_key]
+                
+                # สร้าง mask จากช่วงสี
+                lower_bound = np.array(color_data[0])
+                upper_bound = np.array(color_data[1])
+                mask = cv2.inRange(hsv, lower_bound, upper_bound)
+                kernel = np.ones((5, 5), np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+                # หา contours
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    
+                    if cv2.contourArea(cnt) < 200:
+                        continue
+                    
+                    # ตรวจจับรูปทรง
+                    perimeter = cv2.arcLength(cnt, True)
+                    approx = cv2.approxPolyDP(cnt, 0.02 * perimeter, True)
+                    vertices = len(approx)
+                    
+                    shape = None
+                    if vertices >= 8:
+                        area = cv2.contourArea(cnt)
+                        circularity = 4 * np.pi * area / (perimeter * perimeter)
+                        if circularity > 0.7:
+                            shape = 'circle'
+                    elif vertices == 3:
+                        shape = 'triangle'
+                    elif vertices == 4:
+                        # ใช้ bounding box เพื่อแยกประเภทสี่เหลี่ยม
+                        x, y, w_box, h_box = cv2.boundingRect(cnt)
+                        aspect_ratio = float(w_box) / h_box
+                        
+                        if 0.9 <= aspect_ratio <= 1.1:
+                            shape = 'square'  # สี่เหลี่ยมจัตุรัส
+                        elif aspect_ratio > 1.3:
+                            shape = 'horizontal_rectangle'  # สี่เหลี่ยมผืนผ้าแนวนอน (กว้างมากกว่าสูง)
+                        elif aspect_ratio < 0.7:
+                            shape = 'vertical_rectangle'  # สี่เหลี่ยมผืนผ้าแนวตั้ง (สูงมากกว่ากว้าง)
+                        else:
+                            shape = 'rectangle'  # สี่เหลี่ยมทั่วไป
+                    
+                    if shape == self.target_shape:
+                        x, y, w_box, h_box = cv2.boundingRect(cnt)
+                        center_x = roi_x + x + w_box // 2
+                        center_y = roi_y + y + h_box // 2
+                        break  # เจอแล้วออกจาก loop
+
+                # วาดกรอบและข้อความ (ถ้าเจอวัตถุ)
+                if center_x is not None and center_y is not None:
+                    cv2.rectangle(img, (center_x-15, center_y-15), (center_x+30, center_y+30), (0, 255, 0), 2)
+                    cv2.putText(img, f"{self.target_shape}", (center_x-40, center_y-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            
+                # แสดงข้อมูล
+                cv2.putText(img, f"Detecting: {self.target_color} {self.target_shape}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(img, f"Found: {1 if center_x is not None and center_y is not None else 0} objects", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(img, "Press 'q' to quit", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                
+                cv2.imshow("RoboMaster Detection", img)
+                # แสดงหน้าต่าง mask เพื่อ debug สี (ช่วยหาช่วง HSV)
+                try:
+                    cv2.imshow("Mask", mask)
+                except Exception:
+                    pass
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("🔴 User pressed 'q' - exiting detection")
+                    break
+                
+                now = time.monotonic()
+                dt = now - self.last_time
+                self.last_time = now
+                camera_w = 1280//2
+                camera_h = 720//2
+                if center_x is not None and center_y is not None and tof_dist < 1000 and tof_dist>300:
+                    have_object = True
+                    err_x = (center_x - camera_w)
+                    err_y = (center_y - camera_h)
+                    yaw_cmd = pid_yaw.step(err_x, dt)
+                    pitch_cmd = pid_pitch.step(err_y, dt)
+                    if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05 :
+                        try:
+                            self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
+                        except Exception:
+                            try:
+                                self.ep_gimbal.drive_speed(pitch_speed=pitch_cmd, yaw_speed=yaw_cmd)
+                            except Exception:
+                                pass
+                    else:
+                        # เป้าอยู่ตรงกลางแล้ว - ยิงและออก
+                        print("🎯 Target centered - firing and exiting")
+                        self.ep_blaster.fire(times=3)
+                        time.sleep(1)
+                        self.ep_blaster.fire(times=3)
+                        time.sleep(1)
+                        self.ep_blaster.fire(times=3)
+                        time.sleep(1)
+                        self.record_target_hit(self.target_color, self.target_shape)  # NEW
+                        self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+                        self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
+                        cv2.destroyAllWindows()
+                        self.shoot_grid.append((self.current_position, self.current_orientation, self.target_color, self.target_shape,))
+                        break
+
+                elif center_x is None and center_y is None and time.monotonic() - timebefore < 10.0 and have_object and tof_dist < 1000 and tof_dist > 300:
+                    self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+                    pid_yaw.integ *= 0.9
+                    pid_pitch.integ *= 0.9
+                elif center_x is None and center_y is None and time.monotonic() - timebefore > 3.0 and not have_object and tof_dist < 1000 and tof_dist > 300:
+                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
+                    cv2.destroyAllWindows()
+                    break
+                elif time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist > 300:
+                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
+                    cv2.destroyAllWindows()
+                    break
+                elif tof_dist > 1000 or tof_dist < 300:
+                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
+                    cv2.destroyAllWindows()
+                    break
+                # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
+                center_x = center_y = None
+        else:
+            print("🎯 Target already engaged in this grid.")
+            return None  
     # -------------------- Continuous Sensor Logging (NEW) --------------------
     def _continuous_log_worker(self, frequency_hz=10):
         print(f"[Logging Thread] Started. Logging at {frequency_hz} Hz.")
@@ -362,62 +594,7 @@ class MazeExplorer:
             self._logging_thread_active = False
             if self._logging_thread:
                 self._logging_thread.join(timeout=2.0)
-    #---------------------------------------------------------------------
 
-    def record_object_detection(self, obj_type: str, grid_xy=None, wall=None, offset_m=0.0):  # object detection
-        """บันทึกวัตถุที่ตรวจพบไว้ใน self.detected_objects เพื่อใช้ยิงในรอบ 2"""
-        if grid_xy is None:
-            grid_xy = self.current_position
-        self.detected_objects.append({
-            "type": str(obj_type),
-            "grid": [int(grid_xy[0]), int(grid_xy[1])],
-            "wall": wall,                 # "N"|"E"|"S"|"W" หรือ None ถ้าอยู่กลางช่อง
-            "offset_m": float(offset_m),  # ระยะชิดกำแพง/ออฟเซ็ต (เลือกใช้)
-            "ts": datetime.now().isoformat(timespec="seconds")
-        })
-
-
-    def export_exploration_json(self, filename: str | None = None) -> str:
-        """รวมผลสำรวจทั้งหมดเป็น JSON สำหรับรอบ 2"""
-        def _sorted_edges_from_graph(graph_dict):
-            edges = set()
-            for a, nbs in graph_dict.items():
-                for b in nbs:
-                    edge = tuple(sorted([a, b]))
-                    edges.add(edge)
-            # คืนเป็น list [[x1,y1,x2,y2], ...]
-            return [[a[0], a[1], b[0], b[1]] for (a, b) in sorted(edges)]
-
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        if not filename:
-            filename = f"maze_exploration_{ts}.json"
-
-        graph_edges   = _sorted_edges_from_graph(self.internal_map.graph)
-        blocked_edges = [[a[0], a[1], b[0], b[1]] for (a, b) in sorted(self.internal_map.blocked)]
-        explored_nodes = [[x, y] for (x, y) in sorted(self.internal_map.explored)]
-        visited_path   = [[x, y] for (x, y) in self.visited_path]
-
-        payload = {
-            "metadata": {
-                "version": "lab1.v1",
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "grid_size_m": GRID_SIZE_M,
-                "border": {"width": BORDER[0], "height": BORDER[1]},
-                "start": list(self.visited_path[0]) if self.visited_path else list(START)
-            },
-            "final_position": list(self.current_position),
-            "graph_edges": graph_edges,            # ทางที่เดินได้
-            "blocked_edges": blocked_edges,        # ขอบที่มีกำแพง
-            "explored_nodes": explored_nodes,      # ช่องที่สำรวจแล้ว
-            "visited_path": visited_path,          # เส้นทางที่เดินจริงตามลำดับ
-            "cells_scans": self.scan_log,          # ระยะ N/E/S/W ต่อช่อง (mm)
-            "objects": self.detected_objects       # วัตถุที่เจอ (ไว้ใช้ยิงในรอบ 2)
-        }
-
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        print(f"[JSON] Exploration saved to '{filename}'")
-        return filename
     # ------------------------------------------------------------------------
     def save_csv_logs(self):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -660,6 +837,81 @@ class MazeExplorer:
             "S_mm": wall_distances.get('2', None),
             "W_mm": wall_distances.get('3', None)
         })
+    # -------------------- NEW: Target & Map JSON helpers --------------------
+    def record_target_hit(self, color, shape):
+        """บันทึกเหตุการณ์พบ/ยิงเป้าหมาย ณ กริดปัจจุบัน"""
+        gx, gy = self.current_position
+        x_m = gx * GRID_SIZE_M
+        y_m = gy * GRID_SIZE_M
+        _, _, _, yaw_deg, _, _ = self.pose_handler.get_pose()
+        self.detected_targets.append({
+            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "color": color,
+            "shape": shape,
+            "grid": {"x": gx, "y": gy},
+            "orientation": int(self.current_orientation),     # 0=N,1=E,2=S,3=W
+            "orientation_name": ORIENTATIONS.get(self.current_orientation, "?")
+        })
+
+    def save_targets_json(self):
+        """เซฟไฟล์ JSON ของเป้าหมายที่บันทึก"""
+        if not self.detected_targets:
+            print("[JSON] No targets to save.")
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.targets_json_path = f"targets_run1_{ts}.json"
+        payload = {
+            "meta": {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "grid_size_m": GRID_SIZE_M
+            },
+            "targets": self.detected_targets
+        }
+        try:
+            with open(self.targets_json_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            print(f"[JSON] Targets saved → {self.targets_json_path}")
+        except Exception as e:
+            print(f"[JSON] Error saving targets: {e}")
+
+    def save_map_state_json(self):
+        """เซฟกราฟ/กำแพง/พื้นที่ที่สำรวจ/เส้นทาง สำหรับ Lap2"""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.map_state_json_path = f"map_state_run1_{ts}.json"
+
+        # แปลง graph (set/tuple) ให้อยู่ในรูปที่ serialize ได้
+        graph_json = {f"{k[0]},{k[1]}": [[n[0], n[1]] for n in v]
+                      for k, v in self.internal_map.graph.items()}
+        blocked_json = [[[a[0], a[1]], [b[0], b[1]]]
+                        for (a, b) in sorted(self.internal_map.blocked)]
+        explored_json = [[p[0], p[1]] for p in sorted(self.internal_map.explored)]
+        visited_json = [[p[0], p[1]] for p in self.visited_path]
+
+        gx, gy = self.current_position
+        final_world = {"x": gx * GRID_SIZE_M, "y": gy * GRID_SIZE_M}
+
+        payload = {
+            "meta": {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "grid_size_m": GRID_SIZE_M,
+                "border": {"w": self.border[0], "h": self.border[1]},
+                # เปลี่ยนจาก final_yaw → final_orientation (ตามที่เคยบอก)
+                "final_orientation": int(self.current_orientation),
+                "final_orientation_name": ORIENTATIONS.get(self.current_orientation, "?"),
+                "final_position_grid": {"x": gx, "y": gy},
+            },
+            "graph": graph_json,
+            "blocked": blocked_json,
+            "explored": explored_json,
+            "visited_path": visited_json
+        }
+
+        try:
+            with open(self.map_state_json_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            print(f"[JSON] Map state saved → {self.map_state_json_path}")
+        except Exception as e:
+            print(f"[JSON] Error saving map state: {e}")
 
     # ========================================================================
     # Navigation Functions
@@ -804,38 +1056,32 @@ class MazeExplorer:
         print("   Checking wall clearances using ToF and IR sensors...")
         
         # อ่านค่าจากเซ็นเซอร์
-        try:
-            # ToF หน้า
-            front_distance_mm = self.tof_handler.get_distance()
 
-            wall_left, wall_right, sharp_left_dist, sharp_right_dist = self._read_ir_sensors()
-            print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left_dist:.1f}mm, Right={sharp_right_dist:.1f}mm")
+        # ToF หน้า
+        front_distance_mm = self.tof_handler.get_distance()
 
-            # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
-            if front_distance_mm < WALL_THRESHOLD_MM:
-                move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
-                if abs(move_dist_m) > 0.025:
-                    self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
-            if wall_left:
-                move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m+0.1
-                if abs(move_dist_m) > 0.025:
-                    self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
-            elif wall_right:
-                move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m+0.1
-                if abs(move_dist_m) > 0.025:
-                    self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
-            
-            self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
-            
-        except Exception as e:
-            print(f"Error in wall clearance adjust: {e}")
-            self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
+        wall_left, wall_right, sharp_left_dist, sharp_right_dist = self._read_ir_sensors()
+        print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left_dist:.1f}mm, Right={sharp_right_dist:.1f}mm")
+
+        # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
+        if front_distance_mm < WALL_THRESHOLD_MM:
+            move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=1).wait_for_completed()
+        if wall_left:
+            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=1).wait_for_completed()
+        elif wall_right:
+            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=1).wait_for_completed()
 
     # ========================================================================
     # Movement and PID Control Functions
     # ========================================================================
     
-    def move_forward_pid(self, distance_m, speed_limit=0.5):
+    def move_forward_pid(self, distance_m, speed_limit=1):
         """
         ใช้ PID controller เพื่อเคลื่อนที่ไปข้างหน้าระยะทางที่กำหนด
         
@@ -846,18 +1092,10 @@ class MazeExplorer:
         print(f"   PID Move: Moving forward {distance_m}m.")
         pid = PIDController(Kp=2, Ki=0.02, Kd=0.1, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
         start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
-        while True:
-            curr_x, curr_y, _, _, _, _ = self.pose_handler.get_pose()
-            dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
-            if abs(distance_m - dist_traveled) < 0.01: break
-            if  self.tof_handler.get_distance()<=280:
-                self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
-                break
-            vx_speed = pid.update(dist_traveled)
-            self.ep_chassis.drive_speed(x=vx_speed, y=0, z=0, timeout=0.1)
-            time.sleep(0.01)
 
-        self.ep_chassis.drive_speed(0, 0, 0)
+        self.ep_chassis.move(x=distance_m, y=0, z=0).wait_for_completed()
+        time.sleep(0.01)
+
         print("   PID Move: Completed.")
 
         gx, gy = self.current_position
@@ -867,7 +1105,7 @@ class MazeExplorer:
             "grid_x": gx, "grid_y": gy, "yaw": yaw
         })
 
-    def turn_pid(self, target_angle, speed_limit=90):
+    def turn_pid(self, target_angle, speed_limit=360):
         """
         ใช้ PID controller เพื่อหมุนไปยังมุมที่กำหนด
         
@@ -882,12 +1120,12 @@ class MazeExplorer:
             error = target_angle - current_yaw
             if error > 180: error -= 360
             if error < -180: error += 360
-            if abs(error) < 1.5: break
-            vz_speed = pid.update(-error)
-            self.ep_chassis.drive_speed(x=0, y=0, z=vz_speed, timeout=0.1)
+            if abs(error) < 1.5: 
+                break
+            print(error)
+            self.ep_chassis.move(x=0, y=0, z=error).wait_for_completed()
             time.sleep(0.01)
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-        self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Turn: Completed.")
 
     def execute_path(self, path):
@@ -917,14 +1155,15 @@ class MazeExplorer:
             if target_orientation == 1: target_angle = 90
             elif target_orientation == 2: target_angle = 180
             elif target_orientation == 3: target_angle = -90
-
+            self.detect_and_shot()
             self.turn_pid(target_angle)
             self.current_orientation = target_orientation
+            self.detect_and_shot()
             time.sleep(0.2)
             self.move_forward_pid(GRID_SIZE_M)
             self.current_position = end_node
             self.visited_path.append(self.current_position)
-
+    
             self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
             self.pose_handler.set_yaw(target_angle)
             time.sleep(0.2)
@@ -942,12 +1181,25 @@ class MazeExplorer:
         3. บันทึกข้อมูลเซ็นเซอร์และเส้นทาง
         """
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-
         # เริ่มต้น real-time plotting
         self.init_real_time_plot()
         self.update_real_time_plot()  # แสดงแผนที่เริ่มต้น
+        """
+        รันการตรวจจับวัตถุด้วยกล้อง RoboMaster แบบสั้นๆ
+        
+        target_color: สีเป้าหมาย ('red', 'green', 'blue', 'yellow')
+        target_shape: รูปทรงเป้าหมาย
+            - 'circle': วงกลม
+            - 'square': สี่เหลี่ยมจัตุรัส  
+            - 'vertical_rectangle': สี่เหลี่ยมผืนผ้าแนวตั้ง
+            - 'horizontal_rectangle': สี่เหลี่ยมผืนผ้าแนวนอน
+        """
+        self.ep_camera.start_video_stream(display=False, resolution="720p")
 
+        self.set_target('red', 'vertical_rectangle')
         while True:
+            self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
+            
             if self.current_position not in self.internal_map.explored:
                 previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
                 self.scan_surroundings_with_gimbal(previous_position=previous_pos)
@@ -958,10 +1210,15 @@ class MazeExplorer:
             if not path_to_execute:
                 print(f"\n--- EXPLORATION COMPLETE! All areas explored ---")
                 self.ep_led.set_led(r=0, g=255, b=0, effect="on")
+                self.ep_camera.stop_video_stream()
+                print(self.shoot_grid)
                 break
             self.execute_path(path_to_execute)
             # อัปเดตแผนที่หลังเคลื่อนที่
             self.update_real_time_plot()
+
+        self.save_targets_json()
+        self.save_map_state_json()
 
         print("\n--- Final Marker Map ---")
 
@@ -980,6 +1237,7 @@ class MazeExplorer:
 # ==============================================================================
 # Map Visualization Functions
 # ==============================================================================
+
 def plot_map_with_walls(graph, blocked, path, filename="maze_map.png"):
     """
     วาดแผนที่สุดท้ายพร้อมกำแพง เส้นทาง และ markers
@@ -1073,10 +1331,10 @@ if __name__ == '__main__':
     explorer.run_mission()
     # การหยุดทำงานอย่างปลอดภัย
 
+    
     if explorer:
         explorer.stop_continuous_logging()
         explorer.save_csv_logs()
-        explorer.export_exploration_json()  # สร้างไฟล์ maze_exploration_YYYYmmdd_HHMMSS.json
         explorer.close_real_time_plot()
 
     if ep_robot:
