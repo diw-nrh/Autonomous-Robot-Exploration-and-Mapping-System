@@ -319,7 +319,7 @@ class MazeExplorer:
         self.pose_handler = pose_handler
         self.last_time = time.monotonic()
         # Navigation state
-        self.shoot_grid = []
+        self.shoot_grid = [] # [((x, y), orientation, color, shape)]
         self.visited_for_check = []
         self.current_position = (0, 0)
         self.current_orientation = 0  # 0:N, 1:E, 2:S, 3:W
