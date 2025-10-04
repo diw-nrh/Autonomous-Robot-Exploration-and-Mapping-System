@@ -72,7 +72,7 @@ class MazeTargetRunner(MazeExplorer):
     def execute_path(self, path, shoot_on_arrival=False):
         """
         เดินตามเส้นทางแบบไม่ยิงระหว่างทาง
-        ถ้า shoot_on_arrival=True จะเล็ง/ยิงหลังถึงปลายทาง (no-ToF)
+        และปรับระยะจากกำแพงทุกครั้งหลังเดินแต่ละช่อง
         """
         if not path or len(path) < 2:
             return
@@ -83,6 +83,7 @@ class MazeTargetRunner(MazeExplorer):
             start_node, end_node = path[i], path[i + 1]
             dx, dy = end_node[0] - start_node[0], end_node[1] - start_node[1]
 
+            # หาทิศและมุมเป้าหมาย
             if   (dx, dy) == (0, 1):  target_orientation, target_angle = 0,   0
             elif (dx, dy) == (1, 0):  target_orientation, target_angle = 1,  90
             elif (dx, dy) == (0,-1):  target_orientation, target_angle = 2, 180
@@ -90,29 +91,34 @@ class MazeTargetRunner(MazeExplorer):
             else:
                 continue  # path ผิดรูป
 
-            # หมุนตัวรถไปทิศที่ถูก
+            # หมุนไปทิศที่ถูก
             self.turn_pid(target_angle)
             self.current_orientation = target_orientation
 
-            # ❌ ไม่ยิงระหว่างทาง
-            time.sleep(0.2)
+            # เดินหนึ่งช่อง
             self.move_forward_pid(GRID_SIZE_M)
 
-            # อัปเดตสถานะตำแหน่ง/pose
+            # ✅ ปรับระยะห่างจากกำแพงเล็กน้อย
+            try:
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
+            except Exception as e:
+                print(f"[Adjust skipped] {e}")
+
+            # อัปเดตตำแหน่ง/ทิศ
             self.current_position = end_node
             self.visited_path.append(self.current_position)
             self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
             self.pose_handler.set_yaw(target_angle)
             time.sleep(0.2)
 
-        # ✅ ถึงปลายทางแล้วค่อยยิง (ถ้าระบุ)
+        # ✅ ยิงเมื่อถึงเป้าหมาย (ถ้าระบุ)
         if shoot_on_arrival:
             try:
                 self.ep_gimbal.moveto(yaw=0, pitch=-15).wait_for_completed()
             except Exception:
                 pass
             self.detect_and_shot_no_tof()
-            
+
             
     # --- เล็งและยิงแบบไม่ใช้ ToF ระหว่างเล็ง ---
     def detect_and_shot_no_tof(self, timeout_s=8.0):
