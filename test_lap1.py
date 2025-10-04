@@ -532,7 +532,7 @@ class MazeExplorer:
                         time.sleep(1)
                         self.record_target_hit(self.target_color, self.target_shape)  # NEW
                         self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
-                        self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+                        self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
                         cv2.destroyAllWindows()
                         self.shoot_grid.append((self.current_position, self.current_orientation, self.target_color, self.target_shape,))
                         break
@@ -541,16 +541,16 @@ class MazeExplorer:
                     self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
                     pid_yaw.integ *= 0.9
                     pid_pitch.integ *= 0.9
-                elif center_x is None and center_y is None and time.monotonic() - timebefore > 5.0 and not have_object and tof_dist < 1000 and tof_dist>300:
-                    self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+                elif center_x is None and center_y is None and time.monotonic() - timebefore > 3.0 and not have_object and tof_dist < 1000 and tof_dist>300:
+                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
                 elif time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
-                    self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
                 elif tof_dist > 1000 or tof_dist<300:
-                    self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
                 # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
@@ -817,7 +817,7 @@ class MazeExplorer:
                 self.wall_log.add(tuple(sorted([self.current_position, neighbor_pos])))
 
         # รีเซ็นเตอร์กิมบอล
-        self.ep_gimbal.moveto(yaw=0, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         print("Scan complete using ToF and IR sensors.")
 
         self._save_scan_results(wall_distances)
@@ -1066,16 +1066,16 @@ class MazeExplorer:
         # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
         if front_distance_mm < WALL_THRESHOLD_MM:
             move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
-            if abs(move_dist_m) > 0.025:
-                self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=1).wait_for_completed()
         if wall_left:
             move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m
-            if abs(move_dist_m) > 0.025:
-                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=1).wait_for_completed()
         elif wall_right:
             move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m
-            if abs(move_dist_m) > 0.025:
-                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=1).wait_for_completed()
 
     # ========================================================================
     # Movement and PID Control Functions
@@ -1132,7 +1132,7 @@ class MazeExplorer:
             vz_speed = pid.update(-error)
             self.ep_chassis.drive_speed(x=0, y=0, z=vz_speed, timeout=0.1)
             time.sleep(0.01)
-        self.ep_gimbal.moveto(yaw=0, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Turn: Completed.")
 
@@ -1163,7 +1163,7 @@ class MazeExplorer:
             if target_orientation == 1: target_angle = 90
             elif target_orientation == 2: target_angle = 180
             elif target_orientation == 3: target_angle = -90
-
+            self.detect_and_shot()
             self.turn_pid(target_angle)
             self.current_orientation = target_orientation
             self.detect_and_shot()
@@ -1171,7 +1171,7 @@ class MazeExplorer:
             self.move_forward_pid(GRID_SIZE_M)
             self.current_position = end_node
             self.visited_path.append(self.current_position)
-
+    
             self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
             self.pose_handler.set_yaw(target_angle)
             time.sleep(0.2)
@@ -1188,7 +1188,7 @@ class MazeExplorer:
         2. แสดงแผนที่แบบ real-time
         3. บันทึกข้อมูลเซ็นเซอร์และเส้นทาง
         """
-        self.ep_gimbal.moveto(yaw=0, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
 
         # เริ่มต้น real-time plotting
         self.init_real_time_plot()
@@ -1205,7 +1205,7 @@ class MazeExplorer:
         """
         self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-        self.set_target('red', 'horizontal_rectangle')
+        self.set_target('red', 'vertical_rectangle')
         while True:
             self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
             
