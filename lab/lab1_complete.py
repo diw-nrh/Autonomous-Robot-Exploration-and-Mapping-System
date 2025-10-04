@@ -388,6 +388,7 @@ class MazeExplorer:
         self.target_shape = shape
 
     def detect_and_shot(self):
+        self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
         aim_grid = (self.current_position, self.current_orientation, self.target_color, self.target_shape)
         if aim_grid not in self.shoot_grid:
             pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
@@ -527,7 +528,7 @@ class MazeExplorer:
                         self.ep_blaster.fire(times=3)
                         time.sleep(1)
                         self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
-                        self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+                        self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
                         cv2.destroyAllWindows()
                         self.shoot_grid.append((self.current_position, self.current_orientation, self.target_color, self.target_shape,))
                         break
@@ -537,15 +538,19 @@ class MazeExplorer:
                     pid_yaw.integ *= 0.9
                     pid_pitch.integ *= 0.9
                 elif center_x is None and center_y is None and time.monotonic() - timebefore > 5.0 and not have_object and tof_dist < 1000 and tof_dist>300:
-                    self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
                 elif time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
-                    self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
                 elif tof_dist > 1000 or tof_dist<300:
-                    self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
+                    cv2.destroyAllWindows()
+                    break
+                elif center_x is not None and center_y is not None and time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
+                    self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
                 # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
@@ -1083,7 +1088,7 @@ class MazeExplorer:
             if target_orientation == 1: target_angle = 90
             elif target_orientation == 2: target_angle = 180
             elif target_orientation == 3: target_angle = -90
-
+            self.detect_and_shot()
             self.turn_pid(target_angle)
             self.current_orientation = target_orientation
             self.detect_and_shot()
