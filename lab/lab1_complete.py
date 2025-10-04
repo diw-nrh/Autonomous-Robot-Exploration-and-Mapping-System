@@ -364,7 +364,7 @@ class MazeExplorer:
         
         # Color ranges (HSV)
         self.color_ranges = {
-            'brown_red': ([0, 120, 70], [15, 255, 255]),
+            'brown_red': ([0, 120, 70], [20, 255, 255]),
             'dark_green': ([70, 40, 40], [80, 255, 255]),
             'yellow_brown': ([15, 100, 100], [25, 255, 255]),
             'dark_blue': ([110, 60, 20], [135, 255, 255]),
@@ -503,15 +503,16 @@ class MazeExplorer:
                 now = time.monotonic()
                 dt = now - self.last_time
                 self.last_time = now
-
-                camera_w,camera_h = img.shape
-                
-                if center_x is not None and center_y is not None and tof_dist < 1000 and tof_dist<300:
+                camera_w = 1280//2
+                camera_h = 720//2
+                print(center_x is not None and center_y is not None and tof_dist < 1000 and tof_dist>300)
+                if center_x is not None and center_y is not None and tof_dist < 1000 and tof_dist>300:
                     have_object = True
                     err_x = (center_x - camera_w)
                     err_y = (center_y - camera_h)
                     yaw_cmd = pid_yaw.step(err_x, dt)
                     pitch_cmd = pid_pitch.step(err_y, dt)
+                    print(pitch_cmd,yaw_cmd)
                     if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05 :
                         try:
                             self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
@@ -535,19 +536,22 @@ class MazeExplorer:
                         self.shoot_grid.append((self.current_position, self.current_orientation, self.target_color, self.target_shape,))
                         break
 
-                elif center_x is not None and center_y is not None and time.monotonic() - timebefore < 10.0 and have_object:
+                elif center_x is not None and center_y is not None and time.monotonic() - timebefore < 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
                     self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
                     pid_yaw.integ *= 0.9
                     pid_pitch.integ *= 0.9
-                elif center_x is None and center_y is None and time.monotonic() - timebefore > 5.0 and not have_object:
+                elif center_x is None and center_y is None and time.monotonic() - timebefore > 5.0 and not have_object and tof_dist < 1000 and tof_dist>300:
                     self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
-                elif time.monotonic() - timebefore > 10.0 and have_object:
+                elif time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
                     self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
-                    
+                elif tof_dist > 1000 or tof_dist<300:
+                    self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+                    cv2.destroyAllWindows()
+                    break
                 # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
                 center_x = center_y = None
         else:
@@ -976,32 +980,26 @@ class MazeExplorer:
         print("   Checking wall clearances using ToF and IR sensors...")
         
         # อ่านค่าจากเซ็นเซอร์
-        try:
-            # ToF หน้า
-            front_distance_mm = self.tof_handler.get_distance()
 
-            wall_left, wall_right, sharp_left_dist, sharp_right_dist = self._read_ir_sensors()
-            print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left_dist:.1f}mm, Right={sharp_right_dist:.1f}mm")
+        # ToF หน้า
+        front_distance_mm = self.tof_handler.get_distance()
 
-            # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
-            if front_distance_mm < WALL_THRESHOLD_MM:
-                move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
-                if abs(move_dist_m) > 0.025:
-                    self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
-            if wall_left:
-                move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m
-                if abs(move_dist_m) > 0.025:
-                    self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
-            elif wall_right:
-                move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m
-                if abs(move_dist_m) > 0.025:
-                    self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
-            
-            self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
-            
-        except Exception as e:
-            print(f"Error in wall clearance adjust: {e}")
-            self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
+        wall_left, wall_right, sharp_left_dist, sharp_right_dist = self._read_ir_sensors()
+        print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left_dist:.1f}mm, Right={sharp_right_dist:.1f}mm")
+
+        # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
+        if front_distance_mm < WALL_THRESHOLD_MM:
+            move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
+            if abs(move_dist_m) > 0.025:
+                self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
+        if wall_left:
+            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m
+            if abs(move_dist_m) > 0.025:
+                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
+        elif wall_right:
+            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m
+            if abs(move_dist_m) > 0.025:
+                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
 
     # ========================================================================
     # Movement and PID Control Functions
@@ -1130,7 +1128,7 @@ class MazeExplorer:
         """
         self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-        self.set_target('blue', 'vertical_rectangle')
+        self.set_target('red', 'horizontal_rectangle')
         while True:
             self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
             self.detect_and_shot()
@@ -1145,7 +1143,7 @@ class MazeExplorer:
                 print(f"\n--- EXPLORATION COMPLETE! All areas explored ---")
                 self.ep_led.set_led(r=0, g=255, b=0, effect="on")
                 self.ep_camera.stop_video_stream()
-
+                print(self.shoot_grid)
                 break
             self.execute_path(path_to_execute)
             # อัปเดตแผนที่หลังเคลื่อนที่
