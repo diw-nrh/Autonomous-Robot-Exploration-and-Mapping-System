@@ -1,315 +1,369 @@
-# lab2_rules_bfs.py
 """
-รอบ 2 (no fixed order): ยิงทุกเป้าที่ "ยิงได้" ตามกติกา ด้วย BFS (hop-count)
-- โหลดกราฟ/objects จาก JSON รอบ 1
-- ใช้ ShootRules เพื่อกำหนดว่า object ไหนยิงได้/ไม่ได้
-- เลือกเป้าถัดไปแบบ greedy nearest-next จากสิ่งที่ยิงได้
-- เดินด้วยเมธอดจาก test (execute_path / turn_pid / move_forward_pid)
-- ปรับระยะกำแพงด้วย periodic_wall_clearance_adjust จาก test ตอนเริ่ม, ถึงเป้า และก่อนยิง
+=================================================================================
+LAB 2: MAZE TARGET RUNNER (Round 2)
+=================================================================================
+Description:
+- ใช้ผลสำรวจจาก LAB 1 (map_state_run1_*.json + targets_run1_*.json)
+- โหลดกราฟ/กำแพง/จุดที่สำรวจ แล้ววิ่งด้วย shortest path ไปยังเป้าหมาย
+- เล็งและยิง "ไม่ใช้ ToF ระหว่างเล็ง" (นิ่ง ไม่ขยับตัวรถตอนเล็ง)
+- ไม่สแกนเพิ่มในรอบ 2 (เชื่อถือแผนที่จากรอบแรก)
+
+Usage:
+1) รัน LAB 1 ให้สำรวจเสร็จ จะได้ไฟล์:
+   - map_state_run1_YYYYMMDD_HHMMSS.json
+   - targets_run1_YYYYMMDD_HHMMSS.json (ถ้าคุณเรียก record_target_hit)
+2) ตั้งชื่อไฟล์ทั้งสองด้านล่าง แล้วรัน LAB 2
+
+Author: [Your Name]
+Date: October 2025
+=================================================================================
 """
 
-# =============================================================================
-# CONFIGURATION (แก้ได้ตรงนี้)
-# =============================================================================
-JSON_PATH = "maze_exploration_20251003_120000.json"  # <<< ชี้ไปไฟล์ JSON รอบ 1 ของคุณ
-
-# เริ่มจากตำแหน่งไหนในรอบ 2:
-# - "start" = metadata.start (ปกติ (0,0))
-# - "final" = final_position ของรอบ 1
-START_MODE = "final"   # "start" | "final"
-
-# ระยะห่างกำแพงเป้าหมาย (เมตร) เพื่อจัดท่าก่อนยิง
-CLEARANCE_M = 0.18
-
-# กติกา: อนุญาต/แบนตามสี/รูป/ชนิด (ปล่อย set() คือไม่บังคับ)
-ALLOWED_COLORS = {"red", "blue"}       # set() ถ้าไม่บังคับสี
-ALLOWED_SHAPES = {"circle", "square"}  # set() ถ้าไม่บังคับรูป
-ALLOWED_TYPES  = set()
-BANNED_COLORS  = set()
-BANNED_SHAPES  = set()
-BANNED_TYPES   = {"blue_triangle"}
-RESPECT_OBJ_FLAG = True  # ถ้า object ใน JSON มี can_shoot=False จะไม่ยิง
-
-# =============================================================================
-# IMPORTS
-# =============================================================================
 import json
 import time
+import math
 from collections import deque
-from typing import Dict, List, Set, Tuple, Optional
+from datetime import datetime
 
-import robomaster
-from robomaster import robot
+# ==== ดึงของเดิมจาก LAB 1 ====
+from test_lap1 import (
+    robot,                      # robomaster.robot
+    MazeExplorer,               # คลาสหลักจาก LAB1
+    GRID_SIZE_M,                # ขนาดกริด
+    plot_map_with_walls,        # ฟังก์ชันวาดแผนที่ (เผื่ออยากบันทึก)
+)
 
-# ---- ปรับชื่อโมดูลให้ตรงกับไฟล์รอบ 1 ----
-import test  # ต้องมี: MazeExplorer, TofDataHandler, GimbalDataHandler, PoseDataHandler, GRID_SIZE_M, START
+# ====== ตั้งชื่อไฟล์ JSON (แก้ให้ตรงกับไฟล์ที่ได้จาก LAB 1) ======
+MAP_JSON_PATH = "map_state_run1_YYYYMMDD_HHMMSS.json"
+TARGETS_JSON_PATH = "targets_run1_YYYYMMDD_HHMMSS.json"
 
-Grid = Tuple[int, int]
-# mapping เดียวกับ test: 0=N,1=E,2=S,3=W
-HEADING_TO_DEG = {0: 0, 1: 90, 2: 180, 3: -90}
-
-# =============================================================================
-# Graph + BFS
-# =============================================================================
-def build_graph_from_edges(edges: List[List[int]]) -> Dict[Grid, Set[Grid]]:
-    g: Dict[Grid, Set[Grid]] = {}
-    for x1, y1, x2, y2 in edges:
-        a, b = (x1, y1), (x2, y2)
-        g.setdefault(a, set()).add(b)
-        g.setdefault(b, set()).add(a)
+# ====== Utility: สร้างกราฟ/BFS จาก JSON ======
+def _graph_from_json(map_payload):
+    # key "graph" : {"x,y": [[nx,ny], ...], ...}
+    g = {}
+    for k, lst in map_payload["graph"].items():
+        x, y = map(int, k.split(","))
+        g[(x, y)] = set(tuple(n) for n in lst)
     return g
 
-def bfs_shortest_path(graph: Dict[Grid, Set[Grid]], start: Grid, goal: Grid) -> Optional[List[Grid]]:
+def _bfs_path(graph, start, goal):
     if start == goal:
         return [start]
-    q = deque([start])
-    parent: Dict[Grid, Optional[Grid]] = {start: None}
+    q = deque([(start, [start])])
+    visited = {start}
     while q:
-        u = q.popleft()
-        for v in graph.get(u, []):
-            if v not in parent:
-                parent[v] = u
-                if v == goal:
-                    path = [v]
-                    cur = v
-                    while parent[cur] is not None:
-                        cur = parent[cur]
-                        path.append(cur)
-                    path.reverse()
-                    return path
-                q.append(v)
+        cur, path = q.popleft()
+        for nb in graph.get(cur, []):
+            if nb in visited:
+                continue
+            if nb == goal:
+                return path + [nb]
+            visited.add(nb)
+            q.append((nb, path + [nb]))
     return None
 
-# =============================================================================
-# Object metadata helpers
-# =============================================================================
-def normalize_obj_meta(obj: dict) -> dict:
-    color = (obj.get("color") or "").lower() or None
-    shape = (obj.get("shape") or "").lower() or None
-    typ   = obj.get("type")
-    if (color is None or shape is None) and isinstance(typ, str):
-        t = typ.lower()
-        for sep in (":", "_", "-", "|", "/"):
-            if sep in t:
-                parts = t.split(sep)
-                if len(parts) == 2:
-                    color = color or parts[0]
-                    shape = shape or parts[1]
-                    break
-    return {"color": color, "shape": shape, "type": typ}
-
-# =============================================================================
-# Shooting rules (allowed / banned)
-# =============================================================================
-class ShootRules:
+# ====== LAB 2 Runner (สืบทอดจาก LAB 1) ======
+class MazeTargetRunner(MazeExplorer):
     """
-    - allowed_* แบบ whitelist (ถ้ามีค่า ต้องผ่าน)
-    - banned_* แบบ blacklist (ถ้าติดรายการ จะโดนตัดสิทธิ์)
-    - respect_obj_flag: ถ้าจริงและ object.can_shoot == False จะตัดสิทธิ์
+    รอบ 2: ใช้แผนที่สำเร็จรูปจาก LAB 1 เพื่อไปยังเป้าหมายแบบ shortest path
+    - ไม่สแกนระหว่างทาง
+    - เล็ง/ยิงแบบไม่ใช้ ToF gating
     """
-    def __init__(
-        self,
-        allowed_colors: Set[str] = frozenset(),
-        allowed_shapes: Set[str] = frozenset(),
-        allowed_types:  Set[str] = frozenset(),
-        banned_colors:  Set[str] = frozenset(),
-        banned_shapes:  Set[str] = frozenset(),
-        banned_types:   Set[str] = frozenset(),
-        respect_obj_flag: bool = True,
-    ):
-        self.allowed_colors = {c.lower() for c in allowed_colors}
-        self.allowed_shapes = {s.lower() for s in allowed_shapes}
-        self.allowed_types  = {t.lower() for t in allowed_types}
-        self.banned_colors  = {c.lower() for c in banned_colors}
-        self.banned_shapes  = {s.lower() for s in banned_shapes}
-        self.banned_types   = {t.lower() for t in banned_types}
-        self.respect_obj_flag = respect_obj_flag
 
-    def shootable(self, obj: dict) -> bool:
-        if self.respect_obj_flag and obj.get("can_shoot") is False:
-            return False
-        meta = normalize_obj_meta(obj)
-        col, shp, typ = meta["color"], meta["shape"], (meta["type"].lower() if isinstance(meta["type"], str) else None)
-        # blacklist
-        if col and col in self.banned_colors: return False
-        if shp and shp in self.banned_shapes: return False
-        if typ and typ in self.banned_types:  return False
-        # whitelist (ถ้ากำหนดต้องผ่าน)
-        if self.allowed_colors and (col not in self.allowed_colors): return False
-        if self.allowed_shapes and (shp not in self.allowed_shapes): return False
-        if self.allowed_types  and (typ not in self.allowed_types):  return False
-        return True
+    # --- เล็งและยิงแบบไม่ใช้ ToF ระหว่างเล็ง ---
+    def detect_and_shot_no_tof(self, timeout_s=8.0):
+        pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
+        pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
 
-# =============================================================================
-# Approach cell & selection
-# =============================================================================
-def approach_cells_for_object(obj: dict) -> Tuple[Set[Grid], Optional[int]]:
-    """
-    คืน (ชุด approach cells, desired_heading)
-    - ถ้า wall == "N": ไปยืนที่ (x, y+1) แล้ว "หัน South(0)"
-    - ถ้า wall == "E": ไปยืนที่ (x+1, y) แล้ว "หัน West(1)"
-    - ถ้า wall == "S": ไปยืนที่ (x, y-1) แล้ว "หัน North(2)"
-    - ถ้า wall == "W": ไปยืนที่ (x-1, y) แล้ว "หัน East(3)"
-    - ถ้า wall ไม่มี: ยืนใน cell เดียวกัน ไม่บังคับ heading
-    """
-    x, y = obj["grid"]
-    w = obj.get("wall")
-    if w == "N":
-        return {(x, y + 1)}, 0
-    if w == "E":
-        return {(x + 1, y)}, 1
-    if w == "S":
-        return {(x, y - 1)}, 2
-    if w == "W":
-        return {(x - 1, y)}, 3
-    return {(x, y)}, None
+        self.ep_gimbal.recenter().wait_for_completed()
+        self.ep_gimbal.drive_speed(0,0)  # ensure stop
+        time.sleep(0.2)
 
-def pick_next_target_greedy(graph: Dict[Grid, Set[Grid]],
-                            cur: Grid,
-                            remaining: List[dict],
-                            rules: ShootRules) -> Tuple[Optional[List[Grid]], Optional[dict], Optional[int]]:
-    best = (None, None, None, 10**9)
-    for obj in remaining:
-        if not rules.shootable(obj):
-            continue
-        ac_set, head = approach_cells_for_object(obj)
-        for ac in ac_set:
-            path = bfs_shortest_path(graph, cur, ac)
-            if path:
-                cost = len(path) - 1
-                if cost < best[3]:
-                    best = (path, obj, head, cost)
-    return best[0], best[1], best[2]
+        t0 = time.monotonic()
+        have_object = False
+        self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-# =============================================================================
-# Action: Fire (ปรับตาม SDK จริง)
-# =============================================================================
-def try_fire(ep_robot: robot.Robot):
-    try:
-        # ตัวอย่าง: ep_robot.blaster.fire(times=1)
-        print("[ACTION] Fire!")
-    except Exception as e:
-        print(f"[WARN] Fire API failed: {e}. Fallback to LED flash.")
-        try:
-            ep_robot.led.set_led(r=255, g=0, b=0, effect="flash")
-            time.sleep(0.4)
-            ep_robot.led.set_led(r=0, g=255, b=0, effect="on")
-        except:
-            pass
-
-# =============================================================================
-# Main (no fixed order)
-# =============================================================================
-def run_round2_no_order(json_path: str, rules: ShootRules):
-    # 1) โหลดข้อมูล
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    graph_edges = data["graph_edges"]
-    objects_all = data.get("objects", [])
-    start_xy = tuple(data["metadata"].get("start", test.START))
-    final_xy = tuple(data.get("final_position", start_xy))
-    origin = final_xy if START_MODE.lower() == "final" else start_xy
-
-    graph = build_graph_from_edges(graph_edges)
-
-    # 2) เชื่อมต่อหุ่นและ subscriptions
-    print("Connecting to RoboMaster robot...")
-    ep_robot = robot.Robot()
-    ep_robot.initialize(conn_type="ap")
-    print("Robot connected.")
-
-    tof_handler = test.TofDataHandler()
-    gimbal_handler = test.GimbalDataHandler()
-    pose_handler = test.PoseDataHandler()
-
-    ep_robot.sensor.sub_distance(freq=10, callback=tof_handler.update)
-    ep_robot.chassis.sub_position(freq=10, callback=pose_handler.update_position)
-    ep_robot.chassis.sub_attitude(freq=10, callback=pose_handler.update_attitude)
-    ep_robot.gimbal.sub_angle(freq=20, callback=gimbal_handler.update)
-
-    try:
-        # ใช้คลาสเดินจาก lap1
-        explorer = test.MazeExplorer(ep_robot, tof_handler, gimbal_handler, pose_handler)
-
-        # ตั้งสถานะเริ่ม
-        cur = (int(origin[0]), int(origin[1]))
-        explorer.current_position = cur
-        explorer.visited_path = [cur]
-        explorer.pose_handler.set_xy(cur[0] * test.GRID_SIZE_M, cur[1] * test.GRID_SIZE_M)
-        explorer.pose_handler.set_yaw(0.0)
-
-        # จัดท่าเริ่มงาน (กันไปชิดกำแพงเกิน)
-        explorer.periodic_wall_clearance_adjust(target_clearance_m=CLEARANCE_M)
-
-        remaining = [dict(o) for o in objects_all]
-        shot_any = False
+        center_x = center_y = None
+        err_x = err_y = 0.0
+        self.last_time = time.monotonic()
 
         while True:
-            path, obj, heading = pick_next_target_greedy(graph, cur, remaining, rules)
-            if not path or not obj:
+            # === อ่านภาพ ===
+            try:
+                img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
+                if img is None:
+                    if time.monotonic() - t0 > timeout_s: break
+                    continue
+            except Exception:
+                if time.monotonic() - t0 > timeout_s: break
+                continue
+
+            # === เหมือน LAB1: สร้าง mask หา shape ตาม target_color/target_shape ===
+            import cv2, numpy as np  # local import
+            color_key = self.target_color
+            if self.target_color in self.colors:
+                color_key = self.colors[self.target_color]
+            if color_key not in self.color_ranges:
+                print(f"⚠️ ไม่พบสี '{self.target_color}'")
                 break
 
-            print(f"[INFO] next target: {obj}")
-            print(f"[INFO] path len={len(path)-1}: {path}")
+            h, w = img.shape[:2]
+            blur = cv2.GaussianBlur(img, (5,5), 0)
+            hsv  = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
 
-            # เดินตาม path (ใช้ execute_path ของ lap1)
-            explorer.execute_path(path)
+            lower = np.array(self.color_ranges[color_key][0])
+            upper = np.array(self.color_ranges[color_key][1])
+            mask  = cv2.inRange(hsv, lower, upper)
+            kernel = np.ones((5,5), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-            # ถึง approach cell แล้ว จัด clearance ให้อยู่ตำแหน่งยิงสบาย
-            explorer.periodic_wall_clearance_adjust(target_clearance_m=CLEARANCE_M)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            # หมุนเข้าหาเป้าตามกำแพงถ้าระบุไว้
-            if heading is not None:
-                explorer.turn_pid(HEADING_TO_DEG[heading])
+            center_x = center_y = None
+            for cnt in contours:
+                if cv2.contourArea(cnt) < 200:
+                    continue
+                per = cv2.arcLength(cnt, True)
+                approx = cv2.approxPolyDP(cnt, 0.02 * per, True)
+                vtx = len(approx)
 
-            # เผื่อเซ็นเซอร์เพิ่งนิ่ง ปรับระยะอีกครั้งก่อนยิง
-            explorer.periodic_wall_clearance_adjust(target_clearance_m=CLEARANCE_M)
+                shape = None
+                if vtx >= 8:
+                    area = cv2.contourArea(cnt)
+                    circ = 4*math.pi*area/(per*per + 1e-6)
+                    if circ > 0.7: shape = 'circle'
+                elif vtx == 3:
+                    shape = 'triangle'
+                elif vtx == 4:
+                    x,y,wb,hb = cv2.boundingRect(cnt)
+                    ar = float(wb)/hb
+                    if 0.9 <= ar <= 1.1: shape = 'square'
+                    elif ar > 1.3:       shape = 'horizontal_rectangle'
+                    elif ar < 0.7:       shape = 'vertical_rectangle'
+                    else:                shape = 'rectangle'
 
-            # ยิง
-            try_fire(ep_robot)
-            shot_any = True
+                if shape == self.target_shape:
+                    x,y,wb,hb = cv2.boundingRect(cnt)
+                    center_x = x + wb//2
+                    center_y = y + hb//2
+                    break
 
-            # อัปเดตสถานะ
-            cur = path[-1]
-            explorer.current_position = cur
-            explorer.visited_path.append(cur)
-            explorer.pose_handler.set_xy(cur[0] * test.GRID_SIZE_M, cur[1] * test.GRID_SIZE_M)
+            # === คุมกิมบอลด้วย PID ไม่อิง ToF ===
+            now = time.monotonic()
+            dt  = max(1e-3, now - self.last_time)
+            self.last_time = now
 
-            # เอา object นี้ออกจากคิว
-            idx = remaining.index(obj)
-            remaining.pop(idx)
+            cx, cy = w//2, h//2
+            if center_x is not None and center_y is not None:
+                have_object = True
+                err_x = (center_x - cx)
+                err_y = (center_y - cy)
+                yaw_cmd   = pid_yaw.step(err_x, dt)
+                pitch_cmd = pid_pitch.step(err_y, dt)
 
-        if shot_any:
-            print("\n[DONE] finished shooting all shootable/reachable targets.")
+                # ขยับกิมบอลเล็กน้อยจนเข้าเป้า
+                if abs(err_x) > 6 or abs(err_y) > 6:
+                    self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
+                else:
+                    # อยู่กลางพอดี -> ยิงและจบ
+                    self.ep_gimbal.drive_speed(0,0)
+                    self.ep_blaster.fire(times=3)
+                    self.ep_gimbal.move(pitch=0, yaw=-15).wait_for_completed()
+                    self.record_target_hit(self.target_color, self.target_shape)
+                    break
+            else:
+                # ยังไม่เห็น/หลุดเป้า
+                pid_yaw.integ *= 0.9
+                pid_pitch.integ *= 0.9
+                self.ep_gimbal.drive_speed(0,0)
+
+            if time.monotonic() - t0 > timeout_s and not have_object:
+                print("⏱️ หมดเวลาเล็ง (ยังไม่เห็นเป้า)")
+                break
+
+        self.ep_gimbal.drive_speed(0,0)
+        
+    @staticmethod
+    def _infer_yaw_from_path(visited_path):
+        """เดายอว์จากสองพอยต์สุดท้ายของ visited_path"""
+        try:
+            if len(visited_path) >= 2:
+                (x1, y1), (x2, y2) = visited_path[-2], visited_path[-1]
+                dx, dy = x2 - x1, y2 - y1
+                if   (dx, dy) == (0, 1):  return 0      # North
+                elif (dx, dy) == (1, 0):  return 90     # East
+                elif (dx, dy) == (0,-1):  return 180    # South
+                elif (dx, dy) == (-1,0):  return -90    # West
+        except Exception:
+            pass
+        return 0  # เดาไม่ได้ ให้หันเหนือ
+
+    def run_targets_shortest(self,
+                           map_json_path: str,
+                           targets_json_path: str,
+                           target_filter: dict = None,
+                           draw_after=True,
+                           start_mode: str = "fresh"):  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
+        """
+        map_json_path: path ไปยัง map_state_run1_*.json
+        targets_json_path: path ไปยัง targets_run1_*.json
+        target_filter: เช่น {"color":"yellow","shape":"horizontal_rectangle"} (ถ้า None ใช้ทั้งหมด)
+        """
+        # โหลด JSON
+        with open(map_json_path, "r", encoding="utf-8") as f:
+            map_payload = json.load(f)
+        with open(targets_json_path, "r", encoding="utf-8") as f:
+            targets_payload = json.load(f)
+
+        # กราฟที่สำรวจแล้ว
+        graph = _graph_from_json(map_payload)
+        self.internal_map.graph = {k: set(v) for k,v in graph.items()}
+        self.internal_map.blocked = set(tuple(map(tuple, e)) for e in [
+            (tuple(a), tuple(b)) for a,b in map_payload["blocked"]
+        ])
+
+        # ตั้งค่าเริ่มต้นตาม start_mode
+        visited_path_prev = [(p[0], p[1]) for p in map_payload.get("visited_path", [])]
+        
+        if start_mode == "resume" and visited_path_prev:
+            start_grid = visited_path_prev[-1]
+            start_yaw = self._infer_yaw_from_path(visited_path_prev)
         else:
-            print("\n[INFO] no shootable/reachable targets under current rules.")
+            start_grid = (0, 0)
+            start_yaw = 0  # เหนือ
 
-    finally:
-        # cleanup
-        try:
-            ep_robot.sensor.unsub_distance()
-            ep_robot.gimbal.unsub_angle()
-            ep_robot.chassis.unsub_position()
-            ep_robot.chassis.unsub_attitude()
-        except Exception as e:
-            print(f"[WARN] unsub error: {e}")
-        try:
-            ep_robot.close()
-        except Exception as e:
-            print(f"[WARN] close error: {e}")
+        # sync state
+        self.current_position = tuple(start_grid)
+        self.visited_path = [self.current_position]
+        self.pose_handler.set_xy(start_grid[0]*GRID_SIZE_M, start_grid[1]*GRID_SIZE_M)
+        self.pose_handler.set_yaw(float(start_yaw))
 
-# =============================================================================
-# CLI
-# =============================================================================
+        # เลือกเป้าหมายที่ต้องไป
+        all_targets = targets_payload.get("targets", [])
+        if target_filter:
+            color = target_filter.get("color")
+            shape = target_filter.get("shape")
+            use_targets = [t for t in all_targets
+                           if (color is None or t["color"] == color)
+                           and (shape is None or t["shape"] == shape)]
+        else:
+            use_targets = list(all_targets)
+
+        if not use_targets:
+            print("⚠️ ไม่พบเป้าหมายตามเงื่อนไขในไฟล์ targets")
+            return
+
+        # ตั้งค่าสี/รูปทรงที่ต้องเล็ง
+        if target_filter and ("color" in target_filter or "shape" in target_filter):
+            self.set_target(target_filter.get("color", self.target_color),
+                            target_filter.get("shape", self.target_shape))
+        else:
+            # ถ้าไม่ได้ฟิลเตอร์ ให้ตั้งเป็นค่าสี/รูปทรงตัวแรก
+            self.set_target(use_targets[0]["color"], use_targets[0]["shape"])
+
+        # ไล่ไปทีละเป้าหมาย (เรียงใกล้สุดทีละจุดก็ได้)
+        current = self.current_position
+        remaining = [(t["grid"]["x"], t["grid"]["y"]) for t in use_targets]
+
+        def manhattan(a,b): return abs(a[0]-b[0]) + abs(a[1]-b[1])
+
+        while remaining:
+            # เลือกจุดที่ใกล้ current ที่สุด (heuristic ง่ายๆ)
+            remaining.sort(key=lambda p: manhattan(current, p))
+            goal = remaining.pop(0)
+
+            # หาเส้นทาง
+            path = _bfs_path(graph, current, goal)
+            if not path:
+                print(f"❌ ไป {goal} ไม่ได้ (no path)")
+                continue
+
+            print(f"▶️ ไปยังเป้า {goal} ด้วย path: {path}")
+            self.execute_path(path)        # ใช้ method เดิมจาก LAB 1
+            current = goal
+            self.current_position = goal   # sync
+            self.pose_handler.set_xy(goal[0]*GRID_SIZE_M, goal[1]*GRID_SIZE_M)
+
+            # ถึงแล้ว จอดนิ่ง -> เล็ง/ยิงแบบ no-ToF
+            self.detect_and_shot_no_tof()
+
+        print("✅ รอบ 2 เสร็จสิ้น")
+        if draw_after:
+            plot_map_with_walls(
+                self.internal_map.graph,
+                self.internal_map.blocked,
+                self.visited_path,
+                filename="maze_run2_path.png"
+            )
+
+# ================= MAIN =================
 if __name__ == "__main__":
-    rules = ShootRules(
-        allowed_colors=ALLOWED_COLORS,
-        allowed_shapes=ALLOWED_SHAPES,
-        allowed_types=ALLOWED_TYPES,
-        banned_colors=BANNED_COLORS,
-        banned_shapes=BANNED_SHAPES,
-        banned_types=BANNED_TYPES,
-        respect_obj_flag=RESPECT_OBJ_FLAG,
-    )
-    run_round2_no_order(JSON_PATH, rules)
+    print("Connecting to RoboMaster robot...")
+    ep = robot.Robot()
+    ep.initialize(conn_type="ap")
+    print("Robot connected.")
+
+    # สร้าง handler แบบ LAB 1 (ดึงจาก lab1)
+    from test_lap1 import TofDataHandler, GimbalDataHandler, PoseDataHandler, PID
+
+    tof = TofDataHandler()
+    gim = GimbalDataHandler()
+    pose = PoseDataHandler()
+
+    # สมัคร sensor ที่จำเป็น (ตำแหน่ง/ท่าทาง/กิมบอล) — จะไม่พึ่ง ToF ตอนเล็งก็จริง
+    ep.chassis.sub_position(freq=10, callback=pose.update_position)
+    ep.chassis.sub_attitude(freq=10, callback=pose.update_attitude)
+    ep.gimbal.sub_angle(freq=20, callback=gim.update)
+    # (จะไม่ต้องอ่าน ToF ก็ได้ แต่ถ้าอยาก log ต่อ ก็สมัครไว้)
+    ep.sensor.sub_distance(freq=10, callback=tof.update)
+    START_MODE = "fresh"  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
+    runner = MazeTargetRunner(ep, tof, gim, pose)
+    runner.set_target('yellow', 'horizontal_rectangle')  # ค่า default เผื่อไม่มี filter
+
+    # เริ่มที่ (0,0) yaw 0 ตาม LAB1
+    pose.set_xy(0.0, 0.0)
+    pose.set_yaw(0.0)
+
+    try:
+        # เลือกกรณี: ไปหาเฉพาะสี/รูปทรง หรือเอาทุกเป้าที่บันทึกไว้
+        runner.run_targets_shortest(
+            map_json_path=MAP_JSON_PATH,
+            targets_json_path=TARGETS_JSON_PATH,
+            target_filter={"color": "yellow", "shape": "horizontal_rectangle"},  # หรือ None
+            draw_after=True,
+            start_mode=START_MODE
+        )
+    finally:
+        # cleanup เหมือน LAB 1
+        try:
+            ep.sensor.unsub_distance()
+            ep.gimbal.unsub_angle()
+            ep.chassis.unsub_position()
+            ep.chassis.unsub_attitude()
+            ep.close()
+        except Exception as e:
+            print("Cleanup warning:", e)
+        print("Robot connection closed.")
+    pose.set_yaw(0.0)
+
+    try:
+        # เลือกกรณี: ไปหาเฉพาะสี/รูปทรง หรือเอาทุกเป้าที่บันทึกไว้
+        runner.run_targets_shortest(
+            map_json_path=MAP_JSON_PATH,
+            targets_json_path=TARGETS_JSON_PATH,
+            target_filter={"color": "yellow", "shape": "horizontal_rectangle"},  # หรือ None
+            draw_after=True,
+            start_mode=START_MODE
+        )
+    finally:
+        # cleanup เหมือน LAB 1
+        try:
+            ep.sensor.unsub_distance()
+            ep.gimbal.unsub_angle()
+            ep.chassis.unsub_position()
+            ep.chassis.unsub_attitude()
+            ep.close()
+        except Exception as e:
+            print("Cleanup warning:", e)
+        print("Robot connection closed.")
