@@ -69,7 +69,51 @@ class MazeTargetRunner(MazeExplorer):
     - ไม่สแกนระหว่างทาง
     - เล็ง/ยิงแบบไม่ใช้ ToF gating
     """
+    def execute_path(self, path, shoot_on_arrival=False):
+        """
+        เดินตามเส้นทางแบบไม่ยิงระหว่างทาง
+        ถ้า shoot_on_arrival=True จะเล็ง/ยิงหลังถึงปลายทาง (no-ToF)
+        """
+        if not path or len(path) < 2:
+            return
 
+        self.ep_led.set_led(r=0, g=0, b=255)
+
+        for i in range(len(path) - 1):
+            start_node, end_node = path[i], path[i + 1]
+            dx, dy = end_node[0] - start_node[0], end_node[1] - start_node[1]
+
+            if   (dx, dy) == (0, 1):  target_orientation, target_angle = 0,   0
+            elif (dx, dy) == (1, 0):  target_orientation, target_angle = 1,  90
+            elif (dx, dy) == (0,-1):  target_orientation, target_angle = 2, 180
+            elif (dx, dy) == (-1,0):  target_orientation, target_angle = 3, -90
+            else:
+                continue  # path ผิดรูป
+
+            # หมุนตัวรถไปทิศที่ถูก
+            self.turn_pid(target_angle)
+            self.current_orientation = target_orientation
+
+            # ❌ ไม่ยิงระหว่างทาง
+            time.sleep(0.2)
+            self.move_forward_pid(GRID_SIZE_M)
+
+            # อัปเดตสถานะตำแหน่ง/pose
+            self.current_position = end_node
+            self.visited_path.append(self.current_position)
+            self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
+            self.pose_handler.set_yaw(target_angle)
+            time.sleep(0.2)
+
+        # ✅ ถึงปลายทางแล้วค่อยยิง (ถ้าระบุ)
+        if shoot_on_arrival:
+            try:
+                self.ep_gimbal.moveto(yaw=0, pitch=-15).wait_for_completed()
+            except Exception:
+                pass
+            self.detect_and_shot_no_tof()
+            
+            
     # --- เล็งและยิงแบบไม่ใช้ ToF ระหว่างเล็ง ---
     def detect_and_shot_no_tof(self, timeout_s=8.0):
         pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
@@ -278,15 +322,19 @@ class MazeTargetRunner(MazeExplorer):
             if not path:
                 print(f"❌ ไป {goal} ไม่ได้ (no path)")
                 continue
+            # (ออปชัน) ถ้ามีข้อมูลสี/ทรงของจุด goal ในไฟล์ targets ให้ตั้งค่าก่อนยิง
+            goal_target = next((t for t in use_targets
+                                if (t["grid"]["x"], t["grid"]["y"]) == goal), None)
+            if goal_target:
+                self.set_target(goal_target["color"], goal_target["shape"])
 
-            print(f"▶️ ไปยังเป้า {goal} ด้วย path: {path}")
-            self.execute_path(path)        # ใช้ method เดิมจาก LAB 1
+            # เดินไปถึงเป้าแล้ว “ยิงเมื่อถึงปลายทาง”
+            self.execute_path(path, shoot_on_arrival=True)
+
             current = goal
-            self.current_position = goal   # sync
-            self.pose_handler.set_xy(goal[0]*GRID_SIZE_M, goal[1]*GRID_SIZE_M)
+            self.current_position = goal
+            self.pose_handler.set_xy(goal[0] * GRID_SIZE_M, goal[1] * GRID_SIZE_M)
 
-            # ถึงแล้ว จอดนิ่ง -> เล็ง/ยิงแบบ no-ToF
-            self.detect_and_shot_no_tof()
 
         print("✅ รอบ 2 เสร็จสิ้น")
         if draw_after:
@@ -346,24 +394,3 @@ if __name__ == "__main__":
             print("Cleanup warning:", e)
         print("Robot connection closed.")
     pose.set_yaw(0.0)
-
-    try:
-        # เลือกกรณี: ไปหาเฉพาะสี/รูปทรง หรือเอาทุกเป้าที่บันทึกไว้
-        runner.run_targets_shortest(
-            map_json_path=MAP_JSON_PATH,
-            targets_json_path=TARGETS_JSON_PATH,
-            target_filter={"color": "yellow", "shape": "horizontal_rectangle"},  # หรือ None
-            draw_after=True,
-            start_mode=START_MODE
-        )
-    finally:
-        # cleanup เหมือน LAB 1
-        try:
-            ep.sensor.unsub_distance()
-            ep.gimbal.unsub_angle()
-            ep.chassis.unsub_position()
-            ep.chassis.unsub_attitude()
-            ep.close()
-        except Exception as e:
-            print("Cleanup warning:", e)
-        print("Robot connection closed.")
