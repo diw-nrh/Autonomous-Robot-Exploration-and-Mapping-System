@@ -538,7 +538,7 @@ class MazeExplorer:
                         self.shoot_grid.append((self.current_position, self.current_orientation, self.target_color, self.target_shape,))
                         break
 
-                elif center_x is not None and center_y is not None and time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
+                elif center_x is not None and center_y is not None and time.monotonic() - timebefore < 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
                     self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
                     pid_yaw.integ *= 0.9
                     pid_pitch.integ *= 0.9
@@ -554,7 +554,6 @@ class MazeExplorer:
                     self.ep_gimbal.move(pitch=0, yaw=0).wait_for_completed()
                     cv2.destroyAllWindows()
                     break
-
                 # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
                 center_x = center_y = None
         else:
