@@ -1,3 +1,4 @@
+SHOW_DEBUG = False
 """
 =================================================================================
 LAB 1: MAZE EXPLORATION ROBOT
@@ -135,9 +136,6 @@ class TofDataHandler:
             return self._median if self._window else self.raw_distance
 
     def get_raw_distance(self):
-        """คืนค่า ToF ดิบ"""
-        with self._lock:
-            return self.raw_distance
         with self._lock:
             return self.raw_distance
 
@@ -367,7 +365,7 @@ class MazeExplorer:
         self.color_ranges = {
             'brown_red': ([0, 120, 70], [15, 255, 255]),
             'dark_green': ([70, 40, 40], [80, 255, 255]),
-            'yellow_brown': ([20, 100, 100], [20, 255, 255]),
+            'yellow_brown': ([15, 100, 100], [25, 255, 255]),
             'dark_blue': ([110, 60, 20], [135, 255, 255]),
             'dark_purple_red': ([140, 100, 50], [180, 255, 255]),
             'vivid_dark_red': ([0, 150, 100], [10, 255, 255])
@@ -397,11 +395,6 @@ class MazeExplorer:
         err_x = err_y = 0.0
         yaw_cmd = pitch_cmd = 0.0
         # ensure camera stream is running
-        try:
-            self.ep_camera.start_video_stream(display=False, resolution="720p")
-        except Exception as e:
-            print(f"❌ Failed to start camera stream: {e}")
-            return
         have_object = False  # เพิ่มการประกาศตัวแปร
         time.sleep(0.5)
         timebefore = time.monotonic()
@@ -481,7 +474,7 @@ class MazeExplorer:
 
             # วาดกรอบและข้อความ (ถ้าเจอวัตถุ)
             if center_x is not None and center_y is not None:
-                cv2.rectangle(img, (center_x-30, center_y-30), (center_x+30, center_y+30), (0, 255, 0), 2)
+                cv2.rectangle(img, (center_x-15, center_y-15), (center_x+30, center_y+30), (0, 255, 0), 2)
                 cv2.putText(img, f"{self.target_shape}", (center_x-40, center_y-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         
@@ -506,8 +499,8 @@ class MazeExplorer:
 
             camera_w = 1280//2
             camera_h = 720//2
-            
-            if center_x is not None and center_y is not None and self.tof_handler.get_distance() < 1500:
+            print(self.tof_handler.get_distance())
+            if center_x is not None and center_y is not None and self.tof_handler.get_distance() < 1000:
                 have_object = True
                 err_x = (center_x - camera_w)
                 err_y = (center_y - camera_h)
@@ -526,24 +519,19 @@ class MazeExplorer:
                     # เป้าอยู่ตรงกลางแล้ว - ยิงและออก
                     print("🎯 Target centered - firing and exiting")
                     self.ep_blaster.fire(times=3)
-                    self.ep_gimbal.move(pitch=0, yaw=100).wait_for_completed()
+                    self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+                    self.ep_gimbal.move(pitch=0, yaw=-15).wait_for_completed()
                     self.ep_camera.stop_video_stream()
                     break
 
-            elif time.monotonic() - timebefore < 10.0 and have_object:
+            elif center_x is not None and center_y is not None and time.monotonic() - timebefore < 10.0 and have_object:
                 self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
 
                 pid_yaw.integ *= 0.9
                 pid_pitch.integ *= 0.9
-            elif time.monotonic() - timebefore > 5.0 and not have_object:
-                self.ep_gimbal.move(pitch=0, yaw=100).wait_for_completed()
-
-                self.ep_camera.stop_video_stream()
+            elif center_x is not None and center_y is not None and time.monotonic() - timebefore > 5.0 and not have_object:
+                self.ep_gimbal.move(pitch=0, yaw=-15).wait_for_completed()
                 break
-            else :
-                self.ep_camera.stop_video_stream()
-                break
-                
                 
             # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
             center_x = center_y = None
@@ -806,7 +794,7 @@ class MazeExplorer:
                 self.wall_log.add(tuple(sorted([self.current_position, neighbor_pos])))
 
         # รีเซ็นเตอร์กิมบอล
-        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        self.ep_gimbal.moveto(yaw=0, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         print("Scan complete using ToF and IR sensors.")
 
         self._save_scan_results(wall_distances)
@@ -983,11 +971,11 @@ class MazeExplorer:
                 if abs(move_dist_m) > 0.025:
                     self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
             if wall_left:
-                move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m+0.1
+                move_dist_m = (sharp_left_dist / 1000.0) - (target_clearance_m+0.1)
                 if abs(move_dist_m) > 0.025:
                     self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
             elif wall_right:
-                move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m+0.1
+                move_dist_m = (sharp_right_dist / 1000.0) - (target_clearance_m+0.1)
                 if abs(move_dist_m) > 0.025:
                     self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
             
@@ -1052,7 +1040,7 @@ class MazeExplorer:
             vz_speed = pid.update(-error)
             self.ep_chassis.drive_speed(x=0, y=0, z=vz_speed, timeout=0.1)
             time.sleep(0.01)
-        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        self.ep_gimbal.moveto(yaw=0, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
         self.ep_chassis.drive_speed(0, 0, 0)
         print("   PID Turn: Completed.")
 
@@ -1107,7 +1095,7 @@ class MazeExplorer:
         2. แสดงแผนที่แบบ real-time
         3. บันทึกข้อมูลเซ็นเซอร์และเส้นทาง
         """
-        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        self.ep_gimbal.moveto(yaw=0, pitch=-15, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
 
         # เริ่มต้น real-time plotting
         self.init_real_time_plot()
@@ -1122,8 +1110,11 @@ class MazeExplorer:
             - 'vertical_rectangle': สี่เหลี่ยมผืนผ้าแนวตั้ง
             - 'horizontal_rectangle': สี่เหลี่ยมผืนผ้าแนวนอน
         """
+        self.ep_camera.start_video_stream(display=False, resolution="720p")
+
         self.set_target('yellow', 'horizontal_rectangle')
         while True:
+            self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
             self.detect_and_shot()
             if self.current_position not in self.internal_map.explored:
                 previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
@@ -1135,6 +1126,8 @@ class MazeExplorer:
             if not path_to_execute:
                 print(f"\n--- EXPLORATION COMPLETE! All areas explored ---")
                 self.ep_led.set_led(r=0, g=255, b=0, effect="on")
+                self.ep_camera.stop_video_stream()
+
                 break
             self.execute_path(path_to_execute)
             # อัปเดตแผนที่หลังเคลื่อนที่
