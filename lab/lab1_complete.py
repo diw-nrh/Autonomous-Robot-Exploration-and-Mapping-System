@@ -391,6 +391,8 @@ class MazeExplorer:
     def detect_and_shot(self):
         pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
         pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
+        self.ep_gimbal.recenter().wait_for_completed()
+        tof_dist=self.tof_handler.get_distance()
         center_x = center_y = None
         err_x = err_y = 0.0
         yaw_cmd = pitch_cmd = 0.0
@@ -414,11 +416,11 @@ class MazeExplorer:
             if color_key not in self.color_ranges:
                 print(f"⚠️ ไม่พบสี '{self.target_color}' ในระบบ")
                 return []
-            # ROI (กลางภาพ)
+            # ROI (เต็มจอ): ใช้ทั้งภาพเพื่อให้ตรวจจับเต็มจอ
             h, w = img.shape[:2]
-            roi_w, roi_h = min(800, w), min(450, h)
-            roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
-            roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+            roi_x, roi_y = 0, 0
+            roi_w, roi_h = w, h
+            roi = img
             
             # แปลง HSV และสร้าง mask (เพิ่มการเบลอ + morphology เพื่อลด noise)
             blur = cv2.GaussianBlur(roi, (5, 5), 0)
@@ -497,10 +499,9 @@ class MazeExplorer:
             dt = now - self.last_time
             self.last_time = now
 
-            camera_w = 1280//2
-            camera_h = 720//2
-            print(self.tof_handler.get_distance())
-            if center_x is not None and center_y is not None and self.tof_handler.get_distance() < 1000:
+            camera_w = w // 2
+            camera_h = h // 2
+            if center_x is not None and center_y is not None and tof_dist < 1000:
                 have_object = True
                 err_x = (center_x - camera_w)
                 err_y = (center_y - camera_h)
@@ -521,7 +522,6 @@ class MazeExplorer:
                     self.ep_blaster.fire(times=3)
                     self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
                     self.ep_gimbal.move(pitch=0, yaw=-15).wait_for_completed()
-                    self.ep_camera.stop_video_stream()
                     break
 
             elif center_x is not None and center_y is not None and time.monotonic() - timebefore < 10.0 and have_object:
@@ -971,19 +971,19 @@ class MazeExplorer:
                 if abs(move_dist_m) > 0.025:
                     self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
             if wall_left:
-                move_dist_m = (sharp_left_dist / 1000.0) - (target_clearance_m+0.1)
+                move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m
                 if abs(move_dist_m) > 0.025:
                     self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.3).wait_for_completed()
             elif wall_right:
-                move_dist_m = (sharp_right_dist / 1000.0) - (target_clearance_m+0.1)
+                move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m
                 if abs(move_dist_m) > 0.025:
                     self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
             
-            self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
+            self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.5)
             
         except Exception as e:
             print(f"Error in wall clearance adjust: {e}")
-            self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
+            self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.5)
 
     # ========================================================================
     # Movement and PID Control Functions
