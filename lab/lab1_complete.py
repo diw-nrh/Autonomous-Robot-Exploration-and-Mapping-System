@@ -312,6 +312,7 @@ class MazeExplorer:
         self.ep_gimbal = ep_robot.gimbal
         self.ep_adaptor = ep_robot.sensor_adaptor
         self.ep_camera = ep_robot.camera
+    
         self.ep_blaster = ep_robot.blaster
         # Data handlers
         self.tof_handler = tof_handler
@@ -388,6 +389,7 @@ class MazeExplorer:
         center_x = center_y = None
         err_x = err_y = 0.0
         yaw_cmd = pitch_cmd = 0.0
+        self.ep_camera.start_video_stream(display=False, resolution="720p")
         have_object = False  # เพิ่มการประกาศตัวแปร
         time.sleep(0.5)
         timebefore = time.monotonic()
@@ -407,7 +409,6 @@ class MazeExplorer:
             if color_key not in self.color_ranges:
                 print(f"⚠️ ไม่พบสี '{self.target_color}' ในระบบ")
                 return []
-            
             # ROI (กลางภาพ)
             h, w = img.shape[:2]
             roi_w, roi_h = min(800, w), min(450, h)
@@ -422,11 +423,10 @@ class MazeExplorer:
             lower_bound = np.array(color_data[0])
             upper_bound = np.array(color_data[1])
             mask = cv2.inRange(hsv, lower_bound, upper_bound)
-            
             # หา contours
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
             for cnt in contours:
+                
                 if cv2.contourArea(cnt) < 500:
                     continue
                 
@@ -518,6 +518,7 @@ class MazeExplorer:
                 # หมดเวลา - ออกจาก loop
                 print("⏰ Timeout - exiting detection")
                 self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+                self.ep_camera.stop_video_stream()
                 break
                 
             # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
