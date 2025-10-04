@@ -355,24 +355,30 @@ class MazeExplorer:
         # Logging thread
         self._logging_thread = None
         self._logging_thread_active = False
-        self.color_ranges = {
-            "brown_red":      ([0, 150, 50],   [10, 255, 120],  (0, 0, 255)),
-            "dark_green":     ([70, 150, 20],  [90, 255, 70],   (0, 255, 0)),
-            "yellow_brown":   ([15, 150, 80],  [30, 255, 180],  (0, 255, 255)),
-            "dark_blue":      ([110, 150, 30], [130, 255, 100], (255, 0, 0)),
-            "dark_purple_red":([170, 150, 50], [180, 255, 150], (255, 0, 255)),
-            "vivid_dark_red": ([170, 180, 50], [180, 255, 200], (255, 255, 255))
-        }
-        self.GIMBAL_TURN_SPEED = 360
+       
+        self.ep_robot = ep_robot
+        self.ep_camera = ep_robot.camera
+        self.ep_gimbal = ep_robot.gimbal
+        self.ep_blaster = ep_robot.blaster
+        self.last_time = time.monotonic()
         
-        # สำหรับ backward compatibility (แมปสีเก่าไปใหม่)
+        # Color ranges (HSV)
+        self.color_ranges = {
+            'brown_red': ([0, 120, 70], [15, 255, 255]),
+            'dark_green': ([70, 40, 40], [80, 255, 255]),
+            'yellow_brown': ([20, 100, 100], [20, 255, 255]),
+            'dark_blue': ([110, 60, 20], [135, 255, 255]),
+            'dark_purple_red': ([140, 100, 50], [180, 255, 255]),
+            'vivid_dark_red': ([0, 150, 100], [10, 255, 255])
+        }
+        
+        
+        # Color mapping
         self.colors = {
             'red': "brown_red",
             'green': "dark_green", 
-            'blue': "dark_blue",
             'yellow': "yellow_brown",
-            'purple': "dark_purple_red",
-            'dark_red': "vivid_dark_red"
+            'blue': "dark_blue",
         }
         
         self.target_color = None
@@ -382,14 +388,19 @@ class MazeExplorer:
         """ตั้งค่าเป้าหมาย"""
         self.target_color = color
         self.target_shape = shape
-    
+
     def detect_and_shot(self):
         pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
         pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
         center_x = center_y = None
         err_x = err_y = 0.0
         yaw_cmd = pitch_cmd = 0.0
-        self.ep_camera.start_video_stream(display=False, resolution="720p")
+        # ensure camera stream is running
+        try:
+            self.ep_camera.start_video_stream(display=False, resolution="720p")
+        except Exception as e:
+            print(f"❌ Failed to start camera stream: {e}")
+            return
         have_object = False  # เพิ่มการประกาศตัวแปร
         time.sleep(0.5)
         timebefore = time.monotonic()
@@ -415,19 +426,23 @@ class MazeExplorer:
             roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
             roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
             
-            # แปลง HSV และสร้าง mask
-            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            # แปลง HSV และสร้าง mask (เพิ่มการเบลอ + morphology เพื่อลด noise)
+            blur = cv2.GaussianBlur(roi, (5, 5), 0)
+            hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
             color_data = self.color_ranges[color_key]
             
             # สร้าง mask จากช่วงสี
             lower_bound = np.array(color_data[0])
             upper_bound = np.array(color_data[1])
             mask = cv2.inRange(hsv, lower_bound, upper_bound)
+            kernel = np.ones((5, 5), np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
             # หา contours
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for cnt in contours:
                 
-                if cv2.contourArea(cnt) < 500:
+                if cv2.contourArea(cnt) < 200:
                     continue
                 
                 # ตรวจจับรูปทรง
@@ -475,6 +490,11 @@ class MazeExplorer:
             cv2.putText(img, "Press 'q' to quit", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
             cv2.imshow("RoboMaster Detection", img)
+            # แสดงหน้าต่าง mask เพื่อ debug สี (ช่วยหาช่วง HSV)
+            try:
+                cv2.imshow("Mask", mask)
+            except Exception:
+                pass
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 print("🔴 User pressed 'q' - exiting detection")
                 break
@@ -486,16 +506,16 @@ class MazeExplorer:
             camera_w = 1280//2
             camera_h = 720//2
             
-            if center_x is not None and center_y is not None and self.tof_handler.get_distance() < 1200 and self.tof_handler.get_distance() > 400:
+            if center_x is not None and center_y is not None:
                 have_object = True
                 err_x = (center_x - camera_w)
                 err_y = (center_y - camera_h)
                 yaw_cmd = pid_yaw.step(err_x, dt)
                 pitch_cmd = pid_pitch.step(err_y, dt)
                 
-                if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05:
+                if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05 and self.tof_handler.get_distance() < 800:
                     try:
-                        self.ep_gimbal.drive_speed(pitch_speed=pitch_cmd, yaw_speed=yaw_cmd)
+                        self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
                     except Exception:
                         try:
                             self.ep_gimbal.drive_speed(pitch_speed=pitch_cmd, yaw_speed=yaw_cmd)
@@ -511,15 +531,16 @@ class MazeExplorer:
             elif time.monotonic() - timebefore < 10.0 and have_object:
                 # ยังอยู่ในช่วงเวลาและเคยเจอวัตถุ - หยุดการเคลื่อนไหว gimbal
                 self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+                
+                print(1)
                 pid_yaw.integ *= 0.9
                 pid_pitch.integ *= 0.9
-                
-            elif time.monotonic() - timebefore >= 2.0:
-                # หมดเวลา - ออกจาก loop
-                print("⏰ Timeout - exiting detection")
-                self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
-                self.ep_camera.stop_video_stream()
+            elif time.monotonic() - timebefore < 5.0 and not have_object:
+                self.ep_gimbal.recenter().wait_for_completed()
                 break
+            else :
+                break
+                
                 
             # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
             center_x = center_y = None
