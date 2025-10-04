@@ -25,6 +25,7 @@ Date: October 2025
 # =============================================================================
 # IMPORTS AND DEPENDENCIES
 # =============================================================================
+from robomaster import blaster
 import time
 import threading
 import math
@@ -312,7 +313,7 @@ class MazeExplorer:
         self.ep_gimbal = ep_robot.gimbal
         self.ep_adaptor = ep_robot.sensor_adaptor
         self.ep_camera = ep_robot.camera
-    
+        self.blaster = blaster
         self.ep_blaster = ep_robot.blaster
         # Data handlers
         self.tof_handler = tof_handler
@@ -506,14 +507,14 @@ class MazeExplorer:
             camera_w = 1280//2
             camera_h = 720//2
             
-            if center_x is not None and center_y is not None:
+            if center_x is not None and center_y is not None and self.tof_handler.get_distance() < 800:
                 have_object = True
                 err_x = (center_x - camera_w)
                 err_y = (center_y - camera_h)
                 yaw_cmd = pid_yaw.step(err_x, dt)
                 pitch_cmd = pid_pitch.step(err_y, dt)
                 
-                if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05 and self.tof_handler.get_distance() < 800:
+                if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05 :
                     try:
                         self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
                     except Exception:
@@ -529,7 +530,7 @@ class MazeExplorer:
                     break
                     
             elif time.monotonic() - timebefore < 10.0 and have_object:
-                # ยังอยู่ในช่วงเวลาและเคยเจอวัตถุ - หยุดการเคลื่อนไหว gimbal
+                self.ep_blaster.fire(times=3)
                 self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
                 
                 print(1)
