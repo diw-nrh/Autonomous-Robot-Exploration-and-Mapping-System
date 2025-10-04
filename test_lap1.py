@@ -327,7 +327,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         
         # Exploration settings
-        self.border = (4, 4)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (3, 3)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
         # Exploration settings
@@ -1190,7 +1190,7 @@ class MazeExplorer:
         3. บันทึกข้อมูลเซ็นเซอร์และเส้นทาง
         """
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-
+        self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
         # เริ่มต้น real-time plotting
         self.init_real_time_plot()
         self.update_real_time_plot()  # แสดงแผนที่เริ่มต้น
