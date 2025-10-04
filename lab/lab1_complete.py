@@ -507,7 +507,7 @@ class MazeExplorer:
             camera_w = 1280//2
             camera_h = 720//2
             
-            if center_x is not None and center_y is not None and self.tof_handler.get_distance() < 800:
+            if center_x is not None and center_y is not None and self.tof_handler.get_distance() < 1500:
                 have_object = True
                 err_x = (center_x - camera_w)
                 err_y = (center_y - camera_h)
@@ -525,21 +525,23 @@ class MazeExplorer:
                 else:
                     # เป้าอยู่ตรงกลางแล้ว - ยิงและออก
                     print("🎯 Target centered - firing and exiting")
-                    self.ep_blaster.fire(1)
-                    self.ep_gimbal.recenter().wait_for_completed()
+                    self.ep_blaster.fire(times=3)
+                    self.ep_gimbal.move(pitch=0, yaw=100).wait_for_completed()
+                    self.ep_camera.stop_video_stream()
                     break
-                    
+
             elif time.monotonic() - timebefore < 10.0 and have_object:
-                self.ep_blaster.fire(times=3)
                 self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
-                
-                print(1)
+
                 pid_yaw.integ *= 0.9
                 pid_pitch.integ *= 0.9
-            elif time.monotonic() - timebefore < 5.0 and not have_object:
-                self.ep_gimbal.recenter().wait_for_completed()
+            elif time.monotonic() - timebefore > 5.0 and not have_object:
+                self.ep_gimbal.move(pitch=0, yaw=100).wait_for_completed()
+
+                self.ep_camera.stop_video_stream()
                 break
             else :
+                self.ep_camera.stop_video_stream()
                 break
                 
                 
@@ -1120,7 +1122,7 @@ class MazeExplorer:
             - 'vertical_rectangle': สี่เหลี่ยมผืนผ้าแนวตั้ง
             - 'horizontal_rectangle': สี่เหลี่ยมผืนผ้าแนวนอน
         """
-        self.set_target('blue', 'circle')
+        self.set_target('yellow', 'horizontal_rectangle')
         while True:
             self.detect_and_shot()
             if self.current_position not in self.internal_map.explored:
