@@ -327,7 +327,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         
         # Exploration settings
-        self.border = (5, 4)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (4, 4)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
         # Exploration settings
@@ -505,14 +505,12 @@ class MazeExplorer:
                 self.last_time = now
                 camera_w = 1280//2
                 camera_h = 720//2
-                print(center_x is not None and center_y is not None and tof_dist < 1000 and tof_dist>300)
                 if center_x is not None and center_y is not None and tof_dist < 1000 and tof_dist>300:
                     have_object = True
                     err_x = (center_x - camera_w)
                     err_y = (center_y - camera_h)
                     yaw_cmd = pid_yaw.step(err_x, dt)
                     pitch_cmd = pid_pitch.step(err_y, dt)
-                    print(pitch_cmd,yaw_cmd)
                     if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05 :
                         try:
                             self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
@@ -1090,6 +1088,7 @@ class MazeExplorer:
 
             self.turn_pid(target_angle)
             self.current_orientation = target_orientation
+            self.detect_and_shot()
             time.sleep(0.2)
             self.move_forward_pid(GRID_SIZE_M)
             self.current_position = end_node
@@ -1131,7 +1130,7 @@ class MazeExplorer:
         self.set_target('red', 'horizontal_rectangle')
         while True:
             self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
-            self.detect_and_shot()
+            
             if self.current_position not in self.internal_map.explored:
                 previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
                 self.scan_surroundings_with_gimbal(previous_position=previous_pos)
