@@ -391,8 +391,9 @@ class MazeExplorer:
     def detect_and_shot(self):
         pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
         pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
-        self.ep_gimbal.recenter().wait_for_completed()
+        self.ep_gimbal.recenter(pitch_speed=360, yaw_speed=360).wait_for_completed()
         tof_dist=self.tof_handler.get_distance()
+        self.ep_gimbal.move(pitch=0, yaw=-15).wait_for_completed()
         center_x = center_y = None
         err_x = err_y = 0.0
         yaw_cmd = pitch_cmd = 0.0
@@ -400,6 +401,7 @@ class MazeExplorer:
         have_object = False  # เพิ่มการประกาศตัวแปร
         time.sleep(0.5)
         timebefore = time.monotonic()
+        print(tof_dist)
         while True:
             try:
                 img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
@@ -416,11 +418,15 @@ class MazeExplorer:
             if color_key not in self.color_ranges:
                 print(f"⚠️ ไม่พบสี '{self.target_color}' ในระบบ")
                 return []
-            # ROI (เต็มจอ): ใช้ทั้งภาพเพื่อให้ตรวจจับเต็มจอ
+            # ROI (กลางจอด้านล่าง): โฟกัสเฉพาะบริเวณกึ่งกลางด้านล่างของภาพ
             h, w = img.shape[:2]
-            roi_x, roi_y = 0, 0
-            roi_w, roi_h = w, h
-            roi = img
+            bottom_height_ratio = 0.65   # สัดส่วนความสูงจากด้านล่าง (เช่น 65% ของความสูงภาพ)
+            middle_width_ratio = 1     # สัดส่วนความกว้างตรงกลาง (เช่น 100% ของความกว้างภาพ)
+            roi_h = max(1, int(bottom_height_ratio * h))
+            roi_w = max(1, int(middle_width_ratio * w))
+            roi_y = max(0, min(h - 1, h - roi_h))       # เริ่มที่ด้านล่างขึ้นไป
+            roi_x = max(0, (w - roi_w) // 2)            # กึ่งกลางตามแนวนอน
+            roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
             
             # แปลง HSV และสร้าง mask (เพิ่มการเบลอ + morphology เพื่อลด noise)
             blur = cv2.GaussianBlur(roi, (5, 5), 0)
@@ -501,7 +507,7 @@ class MazeExplorer:
 
             camera_w = w // 2
             camera_h = h // 2
-            if center_x is not None and center_y is not None and tof_dist < 1000:
+            if center_x is not None and center_y is not None and tof_dist < 800:
                 have_object = True
                 err_x = (center_x - camera_w)
                 err_y = (center_y - camera_h)
@@ -520,7 +526,7 @@ class MazeExplorer:
                     # เป้าอยู่ตรงกลางแล้ว - ยิงและออก
                     print("🎯 Target centered - firing and exiting")
                     self.ep_blaster.fire(times=3)
-                    self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+                    self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0, timeout=2)
                     self.ep_gimbal.move(pitch=0, yaw=-15).wait_for_completed()
                     break
 
