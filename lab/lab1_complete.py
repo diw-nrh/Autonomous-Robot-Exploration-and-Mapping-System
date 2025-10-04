@@ -42,7 +42,6 @@ import queue
 # Matplotlib for real-time plotting and map visualization
 import matplotlib.pyplot as plt
 import numpy as np
-from project_3 import VisionDataHandler
 
 # =============================================================================
 # CONFIGURATION AND CONSTANTS
@@ -389,6 +388,9 @@ class MazeExplorer:
         center_x = center_y = None
         err_x = err_y = 0.0
         yaw_cmd = pitch_cmd = 0.0
+        have_object = False  # เพิ่มการประกาศตัวแปร
+        time.sleep(0.5)
+        timebefore = time.monotonic()
         while True:
             try:
                 img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
@@ -459,9 +461,12 @@ class MazeExplorer:
                     x, y, w_box, h_box = cv2.boundingRect(cnt)
                     center_x = roi_x + x + w_box // 2
                     center_y = roi_y + y + h_box // 2
+                    break  # เจอแล้วออกจาก loop
 
-            cv2.rectangle(img, (center_x-30, center_y-30), (center_x+30, center_y+30), (0, 255, 0), 2)
-            cv2.putText(img, f"{self.target_shape}", (center_x-40, center_y-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # วาดกรอบและข้อความ (ถ้าเจอวัตถุ)
+            if center_x is not None and center_y is not None:
+                cv2.rectangle(img, (center_x-30, center_y-30), (center_x+30, center_y+30), (0, 255, 0), 2)
+                cv2.putText(img, f"{self.target_shape}", (center_x-40, center_y-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         
             # แสดงข้อมูล
@@ -471,34 +476,52 @@ class MazeExplorer:
             
             cv2.imshow("RoboMaster Detection", img)
             if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("🔴 User pressed 'q' - exiting detection")
                 break
-            now = time.monotonic();dt = now - self.last_time;self.last_time = now
+            
+            now = time.monotonic()
+            dt = now - self.last_time
+            self.last_time = now
 
             camera_w = 1280//2
             camera_h = 720//2
-            if center_x is not None and center_y is not None and self.tof_handler.get_distance() < 1200:
+            
+            if center_x is not None and center_y is not None and self.tof_handler.get_distance() < 1200 and self.tof_handler.get_distance() > 400:
+                have_object = True
                 err_x = (center_x - camera_w)
                 err_y = (center_y - camera_h)
-                yaw_cmd   = pid_yaw.step(err_x, dt)
+                yaw_cmd = pid_yaw.step(err_x, dt)
                 pitch_cmd = pid_pitch.step(err_y, dt)
+                
                 if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05:
                     try:
-                        self.ep_gimbal.move(yaw=yaw_cmd, pitch=pitch_cmd,
-                                    yaw_speed=self.GIMBAL_TURN_SPEED, pitch_speed=self.GIMBAL_TURN_SPEED
-                                    ).wait_for_completed()
+                        self.ep_gimbal.drive_speed(pitch_speed=pitch_cmd, yaw_speed=yaw_cmd)
                     except Exception:
                         try:
-                            self.ep_gimbal.move(yaw=yaw_cmd, pitch=pitch_cmd,
-                                        yaw_speed=self.GIMBAL_TURN_SPEED, pitch_speed=self.GIMBAL_TURN_SPEED)
+                            self.ep_gimbal.drive_speed(pitch_speed=pitch_cmd, yaw_speed=yaw_cmd)
                         except Exception:
                             pass
                 else:
-                    self.ep_gimbal.recenter().wait_for_completed()
+                    # เป้าอยู่ตรงกลางแล้ว - ยิงและออก
+                    print("🎯 Target centered - firing and exiting")
                     self.ep_blaster.fire(1)
+                    self.ep_gimbal.recenter().wait_for_completed()
                     break
-            else:
+                    
+            elif time.monotonic() - timebefore < 10.0 and have_object:
+                # ยังอยู่ในช่วงเวลาและเคยเจอวัตถุ - หยุดการเคลื่อนไหว gimbal
+                self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
                 pid_yaw.integ *= 0.9
                 pid_pitch.integ *= 0.9
+                
+            elif time.monotonic() - timebefore >= 2.0:
+                # หมดเวลา - ออกจาก loop
+                print("⏰ Timeout - exiting detection")
+                self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+                break
+                
+            # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
+            center_x = center_y = None
     # -------------------- Continuous Sensor Logging (NEW) --------------------
     def _continuous_log_worker(self, frequency_hz=10):
         print(f"[Logging Thread] Started. Logging at {frequency_hz} Hz.")
@@ -1076,7 +1099,7 @@ class MazeExplorer:
         """
         self.set_target('blue', 'circle')
         while True:
-            self.detect_and_shot(self.ep_camera, self.ep_gimbal, self.ep_blaster)
+            self.detect_and_shot()
             if self.current_position not in self.internal_map.explored:
                 previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
                 self.scan_surroundings_with_gimbal(previous_position=previous_pos)
