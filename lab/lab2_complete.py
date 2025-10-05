@@ -102,7 +102,7 @@ class MazeTargetRunner(MazeExplorer):
             time.sleep(0.5)
             # ✅ ปรับระยะห่างจากกำแพงเล็กน้อย
             try:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.2)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
             except Exception as e:
                 print(f"[Adjust skipped] {e}")
 

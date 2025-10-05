@@ -780,7 +780,7 @@ class MazeExplorer:
         self.internal_map.mark_explored(self.current_position)
         
         wall_distances = {}
-        self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
+        self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
         direction_to_skip = -1
         if previous_position:
             print(f"   -> Path from {previous_position} is known. Adding connection automatically.")
@@ -1065,11 +1065,11 @@ class MazeExplorer:
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=1).wait_for_completed()
         if wall_left:
-            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m - 0.1
+            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m - 0.03
             if abs(move_dist_m) > 0.05:
-                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=1).wait_for_completed()
+                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=1).wait_for_completed()
         elif wall_right:
-            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m - 0.1
+            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m - 0.03
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=1).wait_for_completed()
 
@@ -1130,9 +1130,8 @@ class MazeExplorer:
             speed_limit: ความเร็วการหมุนสูงสุด (องศา/วินาที)
         """
         print(f"   PID Turn: Turning to {target_angle} degrees.")
-        pid = PIDController(Kp=2.5, Ki=0, Kd=0.15, setpoint=0, output_limits=(-speed_limit, speed_limit))
         # Execute rotation in small, blocking steps to avoid overlapping actions
-        max_step_deg = 80  # degrees per step
+        max_step_deg = 90  # degrees per step
         while True:
             _, _, _, current_yaw, _, _ = self.pose_handler.get_pose()
             error = target_angle - current_yaw
@@ -1165,7 +1164,7 @@ class MazeExplorer:
         self.ep_led.set_led(r=0, g=0, b=255)
         for i in range(len(path) - 1):
             if self.current_position in self.visited_for_check:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
             self.visited_for_check.append(self.current_position)
             start_node, end_node = path[i], path[i+1]
@@ -1227,7 +1226,7 @@ class MazeExplorer:
 
             self.set_target('green', 'square')
             while True:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
                 
                 if self.current_position not in self.internal_map.explored:
                     previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
