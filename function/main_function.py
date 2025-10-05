@@ -661,31 +661,78 @@ def test_vision_detection():
         # ทดสอบ detection พร้อมแสดงภาพ
         detector.detect_and_shot()
         
-        # แสดงภาพจากกล้องต่อเนื่องหลังจากยิงเสร็จ
-        print("\n📹 Press 'q' to quit camera view...")
+        # หยุดกล้องความละเอียดสูงก่อนเริ่มโหมดประหยัดทรัพยากร
+        print("\n🔄 Switching to low-resource camera mode...")
+        try:
+            detector.ep_camera.stop_video_stream()
+            time.sleep(1)  # รอให้หยุดสมบูรณ์
+        except:
+            print("⚠️ Warning: Could not stop high-res stream")
+            
+        # เริ่มกล้องโหมดประหยัดทรัพยากร
+        try:
+            detector.ep_camera.start_video_stream(display=False, resolution="480p")
+            time.sleep(1)  # รอให้เริ่มงานสมบูรณ์
+            print("✅ Low-resource camera mode started")
+        except:
+            print("⚠️ Warning: Could not start low-res stream")
+        
+        # แสดงภาพจากกล้องแบบประหยัดทรัพยากร
+        print("\n📹 Low-resource camera view (480p, ~10 FPS)")
+        print("📱 Press 'q' or ESC to quit, or wait 30 seconds for auto-exit...")
+        
+        start_time = time.time()
+        frame_count = 0
+        last_frame_time = time.time()
+        
         while True:
             try:
-                img = detector.ep_camera.read_cv2_image(strategy="newest", timeout=1)
+                current_time = time.time()
+                
+                # Auto-exit หลัง 30 วินาที
+                if current_time - start_time > 30:
+                    print("\n⏰ Auto-exit after 30 seconds")
+                    break
+                
+                # จำกัด frame rate ให้เหลือประมาณ 10 FPS
+                if current_time - last_frame_time < 0.1:  # 100ms = 10 FPS
+                    time.sleep(0.05)
+                    continue
+                    
+                img = detector.ep_camera.read_cv2_image(strategy="newest", timeout=0.5)
                 if img is not None:
+                    last_frame_time = current_time
+                    frame_count += 1
+                    
                     # แสดงข้อมูลบนภาพ
                     height, width = img.shape[:2]
-                    cv2.putText(img, "Camera Live View - Press 'q' to quit", 
-                               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(img, f"Resolution: {width}x{height}", 
-                               (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    fps = frame_count / (current_time - start_time) if current_time > start_time else 0
+                    remaining_time = max(0, 30 - int(current_time - start_time))
                     
-                    # วาดกรอบกลาง
+                    cv2.putText(img, "Low-Resource Mode - Press 'q' or ESC to quit", 
+                               (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    cv2.putText(img, f"Resolution: {width}x{height} | FPS: {fps:.1f}", 
+                               (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    cv2.putText(img, f"Auto-exit in: {remaining_time}s", 
+                               (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                    
+                    # วาดกรอบกลางเล็กลง
                     center_x, center_y = width // 2, height // 2
-                    cv2.circle(img, (center_x, center_y), 10, (0, 0, 255), 2)
-                    cv2.line(img, (center_x-30, center_y), (center_x+30, center_y), (0, 0, 255), 2)
-                    cv2.line(img, (center_x, center_y-30), (center_x, center_y+30), (0, 0, 255), 2)
+                    cv2.circle(img, (center_x, center_y), 8, (0, 0, 255), 1)
+                    cv2.line(img, (center_x-20, center_y), (center_x+20, center_y), (0, 0, 255), 1)
+                    cv2.line(img, (center_x, center_y-20), (center_x, center_y+20), (0, 0, 255), 1)
                     
                     cv2.imshow("RoboMaster Live Camera", img)
                 
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                # ปรับปรุงการตรวจจับคีย์ - รอนานขึ้นและรองรับหลายคีย์
+                key = cv2.waitKey(100) & 0xFF  # รอ 100ms
+                if key == ord('q') or key == ord('Q') or key == 27:  # 'q', 'Q', หรือ ESC
+                    print(f"\n✅ Exiting on key press: {chr(key) if key != 27 else 'ESC'}")
                     break
-            except:
-                time.sleep(0.1)
+                    
+            except Exception as e:
+                print(f"⚠️ Camera error: {e}")
+                time.sleep(0.2)
                 continue
         
     except Exception as e:
