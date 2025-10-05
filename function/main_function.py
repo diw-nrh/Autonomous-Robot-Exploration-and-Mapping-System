@@ -149,42 +149,101 @@ class VisionDetector:
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for cnt in contours:
-                if cv2.contourArea(cnt) < 500:
+                area = cv2.contourArea(cnt)
+                # เพิ่มเงื่อนไขการกรองขนาดวัตถุให้เข้มงวดขึ้น
+                if area < 800:  # เพิ่มจาก 500 เป็น 800
                     continue
+                    
                 x, y, bw, bh = cv2.boundingRect(cnt)
+                
+                # กรองวัตถุที่เล็กเกินไปในแต่ละด้าน
+                if bw < 20 or bh < 20:
+                    continue
+                    
+                # กรองวัตถุที่มี aspect ratio แปลกๆ
+                aspect_ratio = max(bw, bh) / min(bw, bh)
+                if aspect_ratio > 5:  # ถ้ายาวหรือสูงเกินไป
+                    continue
+                
                 cx = roi_x + x + bw // 2
                 cy = roi_y + y + bh // 2
                 shape = self._shape_from_contour(cnt)
+                
+                # เพิ่มข้อมูลขนาดเพื่อช่วยในการตัดสินใจ
                 detections.append({
                     "color_key": color_key,
                     "base_color": self._base_color(color_key),
                     "shape": shape,
                     "bbox": (roi_x + x, roi_y + y, bw, bh),
                     "center": (cx, cy),
+                    "area": area,
+                    "confidence": min(area / 1000.0, 1.0)  # confidence จากขนาด
                 })
         return detections
 
     def _cluster_initial(self, dets, dist_thresh=40):
-        """รวม detections ที่ซ้ำกันในหลายเฟรมโดยอิงตามสี/รูปร่าง/ตำแหน่งใกล้กัน"""
+        """รวม detections ที่ซ้ำกันในหลายเฟรมแบบอัจฉริยะ"""
         clustered = []
+        
         for d in dets:
             placed = False
             for c in clustered:
-                # เช็คทั้งสีและตำแหน่งใกล้กัน (ไม่สนรูปร่างเพราะอาจเปลี่ยนระหว่างเฟรม)
+                # เช็คทั้งสีและตำแหน่งใกล้กัน
                 if d["color_key"] == c["color_key"]:
                     (cx, cy) = d["center"]
                     (ccx, ccy) = c["center"]
                     if math.hypot(cx - ccx, cy - ccy) < dist_thresh:
-                        # merge โดยใช้รูปร่างที่ไม่ใช่ unknown ถ้ามี
+                        # เลือกรูปร่างที่ชัดเจนกว่า (ไม่ใช่ unknown)
                         if c["shape"] == "unknown" and d["shape"] != "unknown":
                             c["shape"] = d["shape"]
-                        # เฉลี่ยตำแหน่ง
-                        c["center"] = ((ccx + cx)//2, (ccy + cy)//2)
+                        elif c["shape"] != "unknown" and d["shape"] == "unknown":
+                            pass  # ใช้รูปร่างเดิม
+                        elif c["shape"] != d["shape"] and c["shape"] != "unknown" and d["shape"] != "unknown":
+                            # ถ้ารูปร่างไม่ตรงกัน ใช้ที่มี confidence สูงกว่า
+                            if d.get("confidence", 0) > c.get("confidence", 0):
+                                c["shape"] = d["shape"]
+                        
+                        # เฉลี่ยตำแหน่งแบบถ่วงน้ำหนัก
+                        old_conf = c.get("confidence", 0.5)
+                        new_conf = d.get("confidence", 0.5)
+                        total_conf = old_conf + new_conf
+                        
+                        if total_conf > 0:
+                            c["center"] = (
+                                int((ccx * old_conf + cx * new_conf) / total_conf),
+                                int((ccy * old_conf + cy * new_conf) / total_conf)
+                            )
+                        
+                        # เพิ่ม confidence และ detection count
+                        c["confidence"] = min(c.get("confidence", 0) + d.get("confidence", 0), 2.0)
+                        c["detection_count"] = c.get("detection_count", 1) + 1
+                        c["area"] = max(c.get("area", 0), d.get("area", 0))  # ใช้ area ที่ใหญ่กว่า
+                        
                         placed = True
                         break
+            
             if not placed:
-                clustered.append(d.copy())
-        return clustered
+                new_cluster = d.copy()
+                new_cluster["detection_count"] = 1
+                clustered.append(new_cluster)
+        
+        # กรองเฉพาะวัตถุที่มี confidence สูงและถูกตรวจจับหลายครั้ง
+        reliable_objects = []
+        for c in clustered:
+            confidence = c.get("confidence", 0)
+            count = c.get("detection_count", 1)
+            area = c.get("area", 0)
+            
+            # เงื่อนไขความน่าเชื่อถือ
+            if (confidence >= 0.8 and count >= 2) or (confidence >= 1.2 and count >= 1):
+                if area >= 800:  # ขนาดขั้นต่ำ
+                    reliable_objects.append(c)
+        
+        # เรียงตามความน่าเชื่อถือ (confidence * detection_count)
+        reliable_objects.sort(key=lambda x: x.get("confidence", 0) * x.get("detection_count", 1), reverse=True)
+        
+        # จำกัดจำนวนวัตถุไม่เกิน 5 อัน (ป้องกันการตรวจจับผิด)
+        return reliable_objects[:5]
 
     def _already_shot(self, center, tol=50):
         for (sx, sy) in self._shot_centroids:
@@ -194,12 +253,10 @@ class VisionDetector:
 
     def detect_and_shot(self, sample_time=1.0, aim_timeout=6.0):
         """
-        - ตรวจจับทุกรูปร่างทุกสี (แบบ aumm.py) แล้วเก็บใน self.shoot_target
-        - ยิงเฉพาะวัตถุที่ตรงกับ target_color/target_shape ทีละตัว (ซ้ายไปขวา)
-        - ถ้ายิงแล้วจะไม่ยิงซ้ำ
-        - พิมพ์สรุป self.shoot_target หลังยิงครบ
+        STEP 1: สแกนและบันทึกวัตถุทั้งหมดจากซ้ายไปขวา
+        STEP 2: หาและยิงเฉพาะวัตถุที่ต้องการจากซ้ายไปขวา แล้วหยุด
         """
-        # เตรียม
+        # เตรียมระบบ
         self.shoot_target = []
         self._shot_centroids = []
         self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
@@ -209,12 +266,16 @@ class VisionDetector:
         except Exception:
             pass
 
-        # 1) เก็บตัวอย่างหลายเฟรม เพื่อรวมเป็นชุดเป้าเริ่มต้น
-        print("🔍 Scanning for objects...")
+        # STEP 1: สแกนและบันทึกวัตถุทั้งหมด (แบบละเอียด)
+        print("🔍 STEP 1: Advanced scanning for reliable object detection...")
         t0 = time.time()
         pooled = []
         frame_count = 0
-        while time.time() - t0 < sample_time:
+        
+        # เพิ่มเวลาในการสแกนเพื่อความแม่นยำ
+        extended_sample_time = max(sample_time, 2.0)  # อย่างน้อย 2 วินาที
+        
+        while time.time() - t0 < extended_sample_time:
             try:
                 img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
                 if img is None:
@@ -225,6 +286,7 @@ class VisionDetector:
             except queue.Empty:
                 print("⚠️ Camera queue empty")
                 continue
+                
             dets = self._detect_all_in_frame(img)
             print(f"   Found {len(dets)} detections in frame {frame_count}")
             for i, d in enumerate(dets):
@@ -258,13 +320,17 @@ class VisionDetector:
             cv2.imshow("Binary - Combined (ROI)", combined_mask)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+        # จัดกลุ่มและจัดเรียงจากซ้ายไปขวา
         initial = self._cluster_initial(pooled)
+        initial.sort(key=lambda d: d["center"][0])  # เรียงจากซ้ายไปขวา
+        
         print(f"📊 Total frames processed: {frame_count}")
         print(f"📊 Total detections: {len(pooled)}")
         print(f"📊 Clustered objects: {len(initial)}")
 
-        # เก็บทั้งหมดลง shoot_target (ยังไม่ยิง)
-        for d in initial:
+        # บันทึกวัตถุทั้งหมดจากซ้ายไปขวา พร้อมข้อมูลความน่าเชื่อถือ
+        print("\n💾 Saving reliable objects (Left to Right):")
+        for i, d in enumerate(initial):
             entry = {
                 "color": d["base_color"],
                 "color_key": d["color_key"],
@@ -272,40 +338,91 @@ class VisionDetector:
                 "center": d["center"],
                 "bbox": d["bbox"],
                 "shot": False,
+                "confidence": d.get("confidence", 0),
+                "detection_count": d.get("detection_count", 1),
+                "area": d.get("area", 0)
             }
             self.shoot_target.append(entry)
-            print(f"🎯 Added to shoot_target: {entry['color']} {entry['shape']} at {entry['center']}")
+            conf_str = f"conf:{entry['confidence']:.1f} count:{entry['detection_count']} area:{entry['area']}"
+            print(f"  {i+1}. {entry['color']} {entry['shape']} at {entry['center']} (x={entry['center'][0]}) [{conf_str}]")
 
-        # 2) เลือกเฉพาะที่ตรงกับ target
-        # map shape synonyms
+        # STEP 2: หาและยิงเฉพาะวัตถุที่ต้องการ
+        print(f"\n🎯 STEP 2: Looking for target: {self.target_color} {self.target_shape}")
+        
+        # แปลงชื่อรูปร่าง
         target_shape = self.target_shape
         if target_shape == "horizontal_rectangle":
             target_shape = "rectangle_h"
         elif target_shape == "vertical_rectangle":
             target_shape = "rectangle_v"
 
+        # หาวัตถุที่ตรงกับเป้าหมาย (เรียงจากซ้ายไปขวาแล้ว)
         targets_to_shoot = [d for d in self.shoot_target
                             if d["color"] == self.target_color and d["shape"] == target_shape]
-        print(f"🎯 Targets matching {self.target_color} {target_shape}: {len(targets_to_shoot)}")
-        # ยิงจากซ้ายไปขวา
-        targets_to_shoot.sort(key=lambda d: d["center"][0])
+        
+        print(f"🎯 Found {len(targets_to_shoot)} matching targets:")
+        for i, tgt in enumerate(targets_to_shoot):
+            print(f"  Target {i+1}: {tgt['color']} {tgt['shape']} at {tgt['center']} (x={tgt['center'][0]})")
 
-        # 3) ยิงทีละตัว
+        # เริ่มยิงเป้าหมาย (จากซ้ายไปขวา)
         if not targets_to_shoot:
-            print("⚠️ No targets found matching criteria")
-        else:
-            print(f"🎯 Shooting {len(targets_to_shoot)} targets...")
-            
+            print("⚠️ No matching targets found!")
+            return self.shoot_target
+        
+        print(f"\n🔫 Starting to shoot {len(targets_to_shoot)} targets (Left to Right)...")
+        
+        # ตั้งค่า PID controller
         pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=12.0)
         pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
-        camera_w = 640  # will be corrected by first frame
+        camera_w = 640  # จะถูกปรับจากเฟรมแรก
         camera_h = 360
 
+        # ยิงทีละตัวจากซ้ายไปขวา พร้อมการหันหาอย่างรวดเร็ว
         for idx, tgt in enumerate(targets_to_shoot):
             if self._already_shot(tgt["center"]):
                 print(f"🎯 Target {idx+1} already shot, skipping...")
                 continue
-            print(f"🎯 Aiming at target {idx+1}: {tgt['color']} {tgt['shape']} at {tgt['center']}")
+                
+            print(f"\n🎯 Engaging Target {idx+1}/{len(targets_to_shoot)}: {tgt['color']} {tgt['shape']} at {tgt['center']}")
+            
+            # หันหาเป้าหมายอย่างรวดเร็วก่อน (Pre-aim)
+            print(f"📍 Pre-aiming to target location...")
+            target_x, target_y = tgt["center"]
+            
+            # คำนวณมุมที่ต้องหันไป (สมมติกล้องอยู่กลางภาพ)
+            current_img = None
+            try:
+                current_img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
+            except:
+                pass
+                
+            if current_img is not None:
+                h, w = current_img.shape[:2]
+                center_x, center_y = w // 2, h // 2
+                
+                # คำนวณการเคลื่อนที่ที่ต้องการ
+                delta_x = target_x - center_x
+                delta_y = target_y - center_y
+                
+                # หันไปทางเป้าหมายอย่างรวดเร็ว (ประมาณ 60% ของระยะทาง)
+                if abs(delta_x) > 50 or abs(delta_y) > 50:
+                    # ใช้ moveto สำหรับการเคลื่อนที่แบบรวดเร็ว
+                    yaw_move = delta_x * 0.08   # ปรับค่าตามความเหมาะสม
+                    pitch_move = -delta_y * 0.06  # ปรับค่าตามความเหมาะสม
+                    
+                    # จำกัดการเคลื่อนที่
+                    yaw_move = max(-15, min(15, yaw_move))
+                    pitch_move = max(-10, min(10, pitch_move))
+                    
+                    print(f"  🔄 Quick turn: yaw={yaw_move:.1f}°, pitch={pitch_move:.1f}°")
+                    try:
+                        self.ep_gimbal.move(yaw=yaw_move, pitch=pitch_move).wait_for_completed()
+                        time.sleep(0.2)
+                    except Exception as e:
+                        print(f"  ⚠️ Pre-aim failed: {e}")
+            
+            # เริ่มการเล็งแบบละเอียดด้วย PID
+            print(f"🎯 Fine aiming with PID...")
             t_end = time.time() + aim_timeout
             last_seen = tgt["center"]
             aimed_successfully = False
@@ -348,31 +465,41 @@ class VisionDetector:
                 cv2.imshow("Binary - Combined (ROI)", combined_mask)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
-                # หา detection ใกล้พิกัดล่าสุดของเป้านี้ที่สุด
+                # หา detection ที่ตรงกับเป้าหมายทั้งหมด
                 same = [d for d in dets if d["base_color"] == tgt["color"] and d["shape"] == tgt["shape"]]
                 if same:
-                    # nearest
+                    # เลือกเป้าหมายที่ใกล้ที่สุดกับตำแหน่งล่าสุด
                     d = min(same, key=lambda dd: math.hypot(dd["center"][0]-last_seen[0], dd["center"][1]-last_seen[1]))
                     last_seen = d["center"]
                     cx, cy = last_seen
                     err_x = cx - camera_w
                     err_y = cy - camera_h
+                    
+                    # แสดงข้อมูล error สำหรับ debug
+                    if abs(err_x) > 5 or abs(err_y) > 5:
+                        print(f"    🎯 Adjusting: err_x={err_x:3.0f}, err_y={err_y:3.0f}")
+                    
                     now = time.monotonic()
                     dt = now - self.last_time
                     self.last_time = now
                     yaw_cmd = pid_yaw.step(err_x, dt)
                     pitch_cmd = pid_pitch.step(err_y, dt)
+                    
                     try:
                         self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
                     except Exception:
                         pass
-                    # ถึงกลางภาพแล้ว -> ยิง
-                    if abs(err_x) < 12 and abs(err_y) < 10:
-                        print(f"🎯 Target centered! Firing at {last_seen}")
+                    
+                    # เล็งได้แล้ว -> ยิง (ลดความแม่นยำเล็กน้อยเพื่อให้ยิงได้ง่ายขึ้น)
+                    if abs(err_x) < 15 and abs(err_y) < 12:
+                        print(f"🔥 Target centered! Firing at {last_seen} (err_x={err_x:.0f}, err_y={err_y:.0f})")
+                        
+                        # ยิงหลายครั้งเพื่อความแน่ใจ
                         self.ep_blaster.fire(times=3)
-                        time.sleep(0.6)
-                        self.ep_blaster.fire(times=3)
-                        time.sleep(0.6)
+                        time.sleep(0.3)
+                        self.ep_blaster.fire(times=2)
+                        time.sleep(0.3)
+                        
                         # บันทึกสถานะยิง
                         self._shot_centroids.append(last_seen)
                         tgt["shot"] = True
@@ -380,36 +507,53 @@ class VisionDetector:
                         print(f"✅ Target {idx+1} shot successfully!")
                         break
                 else:
-                    # ไม่เห็นชั่วคราว -> ชะลอเล็กน้อย
+                    # ไม่เห็นเป้า -> รอสักครู่
                     time.sleep(0.05)
             
             if not aimed_successfully:
-                print(f"⚠️ Failed to aim at target {idx+1} within timeout")
+                print(f"⚠️ Failed to shoot target {idx+1} within {aim_timeout}s timeout")
                 
-            # หยุดกิมบอลเล็กน้อยก่อนเป้าถัดไป
+            # หยุดกิมบาลก่อนไปเป้าถัดไป
             try:
                 self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
             except Exception:
                 pass
             time.sleep(0.3)
-
-        # 4) แสดงสรุป
-        shot_count = sum(1 for s in self.shoot_target if s["shot"])
-        total_targets = len([s for s in self.shoot_target if s["color"] == self.target_color and 
-                            (s["shape"] == target_shape or 
-                             (target_shape == "rectangle_h" and s["shape"] == "horizontal_rectangle") or
-                             (target_shape == "rectangle_v" and s["shape"] == "vertical_rectangle"))])
+            
+            # แสดงความคืบหน้า
+            shot_so_far = sum(1 for s in self.shoot_target if s["shot"])
+            print(f"📊 Progress: Shot {shot_so_far} targets so far")
         
-        print(f"\n🎯 Mission Summary: Shot {shot_count}/{total_targets} {self.target_color} {self.target_shape} targets")
-        print("\n[Summary] shoot_target:")
+        print(f"\n🏁 STEP 2 COMPLETED: Finished shooting sequence!")
+
+        # สรุปผลการปฏิบัติงาน
+        shot_count = sum(1 for s in self.shoot_target if s["shot"])
+        total_found = len(self.shoot_target)
+        target_count = len(targets_to_shoot)
+        
+        print(f"\n" + "="*60)
+        print(f"🎯 MISSION SUMMARY")
+        print(f"="*60)
+        print(f"📊 Total objects found: {total_found}")
+        print(f"🎯 Target objects ({self.target_color} {self.target_shape}): {target_count}")
+        print(f"🔫 Successfully shot: {shot_count}/{target_count}")
+        print(f"📈 Success rate: {(shot_count/target_count*100):.1f}%" if target_count > 0 else "📈 Success rate: N/A")
+        
+        print(f"\n📝 DETAILED RESULTS (Left to Right):")
         for i, s in enumerate(self.shoot_target, 1):
-            status = "✅ SHOT" if s["shot"] else "❌ MISSED"
-            print(f"  {i}. color={s['color']} ({s['color_key']}), shape={s['shape']}, center={s['center']}, {status}")
+            is_target = (s["color"] == self.target_color and s["shape"] == target_shape)
+            target_marker = "🎯" if is_target else "  "
+            status = "✅ SHOT" if s["shot"] else ("❌ MISSED" if is_target else "⚪ IGNORED")
+            print(f"  {target_marker} {i:2d}. {s['color']:6s} {s['shape']:12s} at {s['center']} | {status}")
+        
+        # ปิดหน้าต่าง
         try:
             cv2.destroyWindow("Binary - Combined (ROI)")
             cv2.destroyWindow("Detections")
         except Exception:
             pass
+            
+        print(f"\n🏁 DETECTION AND SHOOTING COMPLETED!")
         return self.shoot_target
 # Test function
 def test_camera_only():
@@ -514,8 +658,35 @@ def test_vision_detection():
         
         print(f"🎯 Looking for: {detector.target_color} {detector.target_shape}")
         
-        # ทดสอบ detection
+        # ทดสอบ detection พร้อมแสดงภาพ
         detector.detect_and_shot()
+        
+        # แสดงภาพจากกล้องต่อเนื่องหลังจากยิงเสร็จ
+        print("\n📹 Press 'q' to quit camera view...")
+        while True:
+            try:
+                img = detector.ep_camera.read_cv2_image(strategy="newest", timeout=1)
+                if img is not None:
+                    # แสดงข้อมูลบนภาพ
+                    height, width = img.shape[:2]
+                    cv2.putText(img, "Camera Live View - Press 'q' to quit", 
+                               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(img, f"Resolution: {width}x{height}", 
+                               (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    
+                    # วาดกรอบกลาง
+                    center_x, center_y = width // 2, height // 2
+                    cv2.circle(img, (center_x, center_y), 10, (0, 0, 255), 2)
+                    cv2.line(img, (center_x-30, center_y), (center_x+30, center_y), (0, 0, 255), 2)
+                    cv2.line(img, (center_x, center_y-30), (center_x, center_y+30), (0, 0, 255), 2)
+                    
+                    cv2.imshow("RoboMaster Live Camera", img)
+                
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            except:
+                time.sleep(0.1)
+                continue
         
     except Exception as e:
         print(f"❌ Vision test failed: {e}")
