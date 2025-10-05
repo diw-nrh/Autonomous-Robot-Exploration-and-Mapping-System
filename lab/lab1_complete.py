@@ -434,8 +434,6 @@ class MazeExplorer:
                 hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
                 color_data = self.color_ranges[color_key]
                 
-                # สร้าง mask จากช่วงสี
-                # สร้าง mask จากช่วงสี
                 # สร้าง mask จากช่วงสี (รองรับกรณีแดง 2 ช่วง)
                 is_dual_range = (
                     isinstance(color_data, tuple)
