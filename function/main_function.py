@@ -78,10 +78,11 @@ class VisionDetector:
         
         # Color ranges (HSV)
         self.color_ranges = {
-            'brown_red': ([0, 120, 70], [25, 255, 255]),
-            'dark_green': ([40, 60, 20], [85, 255, 180]),
-            'yellow_brown': ([18, 100, 100], [40, 255, 255]),
-            'dark_blue': ([95, 70, 20], [130, 255, 200])
+            # red ต้อง 2 ช่วง: 0–25 และ 170–180 (tuple ของคู่ช่วงสี)
+            'brown_red': (([0, 120, 70], [10, 255, 255]), ([170, 120, 70], [180, 255, 255])),
+            'dark_green': ([40, 60, 20],   [85, 255, 180]),
+            'yellow_brown': ([18, 100, 100],[40, 255, 255]),
+            'dark_blue': ([95, 70, 20],    [130, 255, 200])
         }
         
         
@@ -430,7 +431,7 @@ class VisionDetector:
                     
                     print(f"  🔄 Direct turn to target: yaw={yaw_move:.1f}°, pitch={pitch_move:.1f}°")
                     try:
-                        self.ep_gimbal.move(yaw=yaw_move, pitch=pitch_move).wait_for_completed()
+                        self.ep_gimbal.move(yaw=yaw_move, pitch=0).wait_for_completed()
                         time.sleep(0.3)
                         print(f"  ✅ Direct turn completed")
                     except Exception as e:
