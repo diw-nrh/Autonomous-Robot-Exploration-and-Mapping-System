@@ -327,7 +327,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         
         # Exploration settings
-        self.border = (3, 3)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (5, 5)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
         # Exploration settings
@@ -1409,7 +1409,7 @@ class MazeExplorer:
             """
             self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-            self.set_target('green', 'square')
+            self.set_target('green', 'vertical_rectangle')
             while True:
                 self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
                 
