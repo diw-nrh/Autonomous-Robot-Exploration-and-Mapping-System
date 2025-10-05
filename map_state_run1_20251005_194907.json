@@ -1,0 +1,53 @@
+{
+  "meta": {
+    "created_at": "2025-10-05T19:49:07",
+    "grid_size_m": 0.6,
+    "border": {
+      "w": 3,
+      "h": 3
+    },
+    "final_orientation": 0,
+    "final_orientation_name": "North",
+    "final_position_grid": {
+      "x": 0,
+      "y": 0
+    }
+  },
+  "graph": {
+    "0,0": [
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        0
+      ]
+    ],
+    "0,1": [
+      [
+        0,
+        0
+      ]
+    ],
+    "1,0": [
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  "blocked": [],
+  "explored": [
+    [
+      0,
+      0
+    ]
+  ],
+  "visited_path": [
+    [
+      0,
+      0
+    ]
+  ]
+}

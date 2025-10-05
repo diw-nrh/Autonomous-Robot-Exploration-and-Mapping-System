@@ -79,9 +79,9 @@ class VisionDetector:
         # Color ranges (HSV)
         self.color_ranges = {
             'brown_red': ([0, 120, 70], [25, 255, 255]),
-            'dark_green': ([60, 40, 40], [95, 255, 255]),
-            'yellow_brown': ([15, 100, 100], [25, 255, 255]),
-            'dark_blue': ([90, 60, 20], [150, 255, 255])
+            'dark_green': ([40, 60, 20], [85, 255, 180]),
+            'yellow_brown': ([18, 100, 100], [40, 255, 255]),
+            'dark_blue': ([95, 70, 20], [130, 255, 200])
         }
         
         
