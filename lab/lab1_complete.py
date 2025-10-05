@@ -368,8 +368,8 @@ class MazeExplorer:
         
         # Color ranges (HSV)
         self.color_ranges = {
-            'brown_red': ( ([0, 120, 70],  [10, 255, 255]),
-                        ([170, 120, 70],[180, 255, 255]) ),  # แดง 2 ช่วง
+            # red ต้อง 2 ช่วง: 0–25 และ 170–180 (tuple ของคู่ช่วงสี)
+            'brown_red': (([0, 120, 70], [10, 255, 255]), ([170, 120, 70], [180, 255, 255])),
             'dark_green': ([40, 60, 20],   [85, 255, 180]),
             'yellow_brown': ([18, 100, 100],[40, 255, 255]),
             'dark_blue': ([95, 70, 20],    [130, 255, 200])
@@ -435,7 +435,17 @@ class MazeExplorer:
                 color_data = self.color_ranges[color_key]
                 
                 # สร้าง mask จากช่วงสี
-                if isinstance(color_data, tuple):
+                # สร้าง mask จากช่วงสี
+                # สร้าง mask จากช่วงสี (รองรับกรณีแดง 2 ช่วง)
+                is_dual_range = (
+                    isinstance(color_data, tuple)
+                    and len(color_data) == 2
+                    and all(
+                        isinstance(r, (list, tuple, np.ndarray)) and len(r) == 2
+                        for r in color_data
+                    )
+                )
+                if is_dual_range:
                     (lower1, upper1), (lower2, upper2) = color_data
                     mask1 = cv2.inRange(hsv, np.array(lower1, dtype=np.uint8), np.array(upper1, dtype=np.uint8))
                     mask2 = cv2.inRange(hsv, np.array(lower2, dtype=np.uint8), np.array(upper2, dtype=np.uint8))
@@ -444,6 +454,9 @@ class MazeExplorer:
                     lower_bound = np.array(color_data[0], dtype=np.uint8)
                     upper_bound = np.array(color_data[1], dtype=np.uint8)
                     mask = cv2.inRange(hsv, lower_bound, upper_bound)
+
+
+
                 kernel = np.ones((5, 5), np.uint8)
                 mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
                 mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
@@ -786,7 +799,7 @@ class MazeExplorer:
         self.internal_map.mark_explored(self.current_position)
         
         wall_distances = {}
-        self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
+        self.periodic_wall_clearance_adjust(target_clearance_m=0.19)
         direction_to_skip = -1
         if previous_position:
             print(f"   -> Path from {previous_position} is known. Adding connection automatically.")
@@ -873,8 +886,8 @@ class MazeExplorer:
             with open(self.targets_json_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             print(f"[JSON] Targets saved → {self.targets_json_path}")
-        except:
-            print('cant save')
+        except Exception as e:
+                print(f"{e}")
 
     def save_map_state_json(self):
         """เซฟกราฟ/กำแพง/พื้นที่ที่สำรวจ/เส้นทาง สำหรับ Lap2"""
@@ -1064,7 +1077,7 @@ class MazeExplorer:
 
         wall_left, wall_right, sharp_left_dist, sharp_right_dist = self._read_ir_sensors()
         print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left_dist:.1f}mm, Right={sharp_right_dist:.1f}mm")
-
+        print(f"   Left={sharp_left_dist}, Right={sharp_right_dist}")
         # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
         if front_distance_mm < WALL_THRESHOLD_MM:
             move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
@@ -1170,7 +1183,7 @@ class MazeExplorer:
         self.ep_led.set_led(r=0, g=0, b=255)
         for i in range(len(path) - 1):
             if self.current_position in self.visited_for_check:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.19)
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
             self.visited_for_check.append(self.current_position)
             start_node, end_node = path[i], path[i+1]
@@ -1232,7 +1245,7 @@ class MazeExplorer:
 
             self.set_target('green', 'square')
             while True:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.19)
                 
                 if self.current_position not in self.internal_map.explored:
                     previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
@@ -1254,8 +1267,8 @@ class MazeExplorer:
                 self.execute_path(path_to_execute)
                 # อัปเดตแผนที่หลังเคลื่อนที่
                 self.update_real_time_plot()
-        except:
-            print("error to complete")
+        except Exception as e:
+                print(f"{e}")
         finally:
             self.save_targets_json()
             self.save_map_state_json()
@@ -1369,14 +1382,14 @@ if __name__ == '__main__':
     time.sleep(2)
     try:
         explorer.run_mission()
-    except:
-        print("error to end")
+    except Exception as e:
+                print(f"{e}")
     finally:
         try:
             explorer.save_targets_json()
             explorer.save_map_state_json()
-        except:
-            print("cant save")
+        except Exception as e:
+                print(f"{e}")
     # การหยุดทำงานอย่างปลอดภัย
 
     
