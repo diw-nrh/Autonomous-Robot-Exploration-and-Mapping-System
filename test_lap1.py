@@ -353,7 +353,7 @@ class MazeExplorer:
         self.continuous_sensor_log = []  # บันทึกเซ็นเซอร์ต่อเนื่อง
 
         self.detected_targets = []        # list ของเป้าหมายที่เจอ/ยิง
-        self.targets_json_path = None     # path ไฟล์ targets_*.json
+        self.targets_json_path = None    # path ไฟล์ targets_*.json
         self.map_state_json_path = None   # path ไฟล์ map_state_*.json
 
         # Logging thread
@@ -392,9 +392,10 @@ class MazeExplorer:
         self.target_shape = shape
 
     def detect_and_shot(self):
-        self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
+        self.ep_chassis.move(x=0, y=0, z=0, xy_speed=0.3)
         aim_grid = (self.current_position, self.current_orientation, self.target_color, self.target_shape)
         if aim_grid not in self.shoot_grid:
+            pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
             pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
             pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
             self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
@@ -403,11 +404,9 @@ class MazeExplorer:
             center_x = center_y = None
             err_x = err_y = 0.0
             yaw_cmd = pitch_cmd = 0.0
-            # ensure camera stream is running
             have_object = False  # เพิ่มการประกาศตัวแปร
             time.sleep(0.5)
             timebefore = time.monotonic()
-        
             while True:
                 try:
                     img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
@@ -855,10 +854,6 @@ class MazeExplorer:
         })
 
     def save_targets_json(self):
-        """เซฟไฟล์ JSON ของเป้าหมายที่บันทึก"""
-        if not self.detected_targets:
-            print("[JSON] No targets to save.")
-            return
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.targets_json_path = f"targets_run1_{ts}.json"
         payload = {
@@ -872,8 +867,8 @@ class MazeExplorer:
             with open(self.targets_json_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             print(f"[JSON] Targets saved → {self.targets_json_path}")
-        except Exception as e:
-            print(f"[JSON] Error saving targets: {e}")
+        except:
+            print('cant save')
 
     def save_map_state_json(self):
         """เซฟกราฟ/กำแพง/พื้นที่ที่สำรวจ/เส้นทาง สำหรับ Lap2"""
@@ -1093,18 +1088,28 @@ class MazeExplorer:
         print(f"   PID Move: Moving forward {distance_m}m.")
         pid = PIDController(Kp=2, Ki=0.02, Kd=0.1, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
         start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
+        # Execute motion in small, blocking steps to avoid overlapping actions
+        max_step = 0.6  # meters per step
         while True:
+            # Obstacle check BEFORE issuing a new move action
+            if self.tof_handler.get_distance() <= 280:
+                print("   PID Move: Obstacle detected by ToF (<=280mm). Aborting forward move.")
+                break
+
             curr_x, curr_y, _, _, _, _ = self.pose_handler.get_pose()
             dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
-            if abs(distance_m - dist_traveled) < 0.01: break
-            if  self.tof_handler.get_distance()<=280:
-                self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
+            print(dist_traveled)
+            remaining = distance_m - dist_traveled
+            if abs(remaining) < 0.1:
                 break
-            vx_speed = pid.update(dist_traveled)
-            self.ep_chassis.drive_speed(x=vx_speed, y=0, z=0, timeout=0.1)
-            time.sleep(0.01)
 
-        self.ep_chassis.drive_speed(0, 0, 0 , timeout=0.1)
+            # Determine a safe step distance and speed
+            step = max(-max_step, min(max_step, remaining))
+            step_speed = min(speed_limit, max(0.6, abs(step) * 2))
+
+            action = self.ep_chassis.move(x=step, y=0, z=0, xy_speed=step_speed)
+            action.wait_for_completed()
+            time.sleep(0.01)
         print("   PID Move: Completed.")
 
         gx, gy = self.current_position
@@ -1124,19 +1129,25 @@ class MazeExplorer:
         """
         print(f"   PID Turn: Turning to {target_angle} degrees.")
         pid = PIDController(Kp=2.5, Ki=0, Kd=0.15, setpoint=0, output_limits=(-speed_limit, speed_limit))
+        # Execute rotation in small, blocking steps to avoid overlapping actions
+        max_step_deg = 20  # degrees per step
         while True:
             _, _, _, current_yaw, _, _ = self.pose_handler.get_pose()
             error = target_angle - current_yaw
             if error > 180: error -= 360
             if error < -180: error += 360
-            if abs(error) < 1.5: 
-                self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
+            print(error,2)
+            if abs(error) < 1.5:
                 break
-            vz_speed = pid.update(-error)
-            self.ep_chassis.drive_speed(x=0, y=0, z=vz_speed, timeout=0.1)
+            
+            # Use a clamped step rotation to the target
+            step_deg = max(-max_step_deg, min(max_step_deg, error))
+            step_speed = min(speed_limit, max(30, abs(step_deg) * 10))
+
+            action = self.ep_chassis.move(x=0, y=0, z=-step_deg, z_speed=step_speed)
+            action.wait_for_completed()
             time.sleep(0.01)
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-        self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
         print("   PID Turn: Completed.")
 
     def execute_path(self, path):
@@ -1195,7 +1206,7 @@ class MazeExplorer:
         3. บันทึกข้อมูลเซ็นเซอร์และเส้นทาง
         """
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-        self.ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
+        
         # เริ่มต้น real-time plotting
         self.init_real_time_plot()
         self.update_real_time_plot()  # แสดงแผนที่เริ่มต้น
@@ -1211,7 +1222,7 @@ class MazeExplorer:
         """
         self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-        self.set_target('red', 'vertical_rectangle')
+        self.set_target('green', 'square')
         while True:
             self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
             
@@ -1224,9 +1235,13 @@ class MazeExplorer:
             path_to_execute = self.decide_next_path()
             if not path_to_execute:
                 print(f"\n--- EXPLORATION COMPLETE! All areas explored ---")
+                
                 self.ep_led.set_led(r=0, g=255, b=0, effect="on")
+                time.sleep(0.1)
                 self.ep_camera.stop_video_stream()
-                print(self.shoot_grid)
+                time.sleep(0.1)
+                A=self.shoot_grid
+                print(A)
                 break
             self.execute_path(path_to_execute)
             # อัปเดตแผนที่หลังเคลื่อนที่
@@ -1342,8 +1357,14 @@ if __name__ == '__main__':
 
     # รอให้ระบบเซ็นเซอร์เสถียร
     time.sleep(2)
-    
-    explorer.run_mission()
+    try:
+        explorer.run_mission()
+    finally:
+        try:
+            explorer.save_targets_json()
+            explorer.save_map_state_json()
+        except:
+            print("cant save")
     # การหยุดทำงานอย่างปลอดภัย
 
     

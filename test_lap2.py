@@ -125,10 +125,10 @@ class MazeTargetRunner(MazeExplorer):
         pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
         
         # รีเซ็ตกิมบอล
-        self.ep_gimbal.recenter().wait_for_completed()
+        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
         timebefore = time.monotonic()
         have_object = False
-        self.ep_camera.start_video_stream(display=False, resolution="720p")
+        
         
         center_x = center_y = None
         err_x = err_y = 0.0
@@ -234,7 +234,7 @@ class MazeTargetRunner(MazeExplorer):
                 print("⏱️ หมดเวลาเล็ง (ยังไม่เห็นเป้า)")
                 break
                 
-    self.ep_gimbal.drive_speed(0,0)
+        self.ep_gimbal.drive_speed(0,0)
         
     @staticmethod
     def _infer_yaw_from_path(visited_path):
@@ -317,7 +317,7 @@ class MazeTargetRunner(MazeExplorer):
         # ไล่ไปทีละเป้าหมาย (เรียงใกล้สุดทีละจุดก็ได้)
         current = self.current_position
         remaining = [(t["grid"]["x"], t["grid"]["y"]) for t in use_targets]
-
+        self.ep_camera.start_video_stream(display=False, resolution="720p")
         def manhattan(a,b): return abs(a[0]-b[0]) + abs(a[1]-b[1])
 
         while remaining:
@@ -342,7 +342,7 @@ class MazeTargetRunner(MazeExplorer):
             current = goal
             self.current_position = goal
             self.pose_handler.set_xy(goal[0] * GRID_SIZE_M, goal[1] * GRID_SIZE_M)
-
+        self.ep_camera.disable_video_stream()
 
         print("✅ รอบ 2 เสร็จสิ้น")
         if draw_after:
@@ -380,13 +380,13 @@ if __name__ == "__main__":
     # เริ่มที่ (0,0) yaw 0 ตาม LAB1
     pose.set_xy(0.0, 0.0)
     pose.set_yaw(0.0)
-
+    
     try:
         # เลือกกรณี: ไปหาเฉพาะสี/รูปทรง หรือเอาทุกเป้าที่บันทึกไว้
         runner.run_targets_shortest(
             map_json_path=MAP_JSON_PATH,
             targets_json_path=TARGETS_JSON_PATH,
-            target_filter={"color": "yellow", "shape": "horizontal_rectangle"},  # หรือ None
+            target_filter={"color": "None", "shape": "None"},  # หรือ None
             draw_after=True,
             start_mode=START_MODE
         )
