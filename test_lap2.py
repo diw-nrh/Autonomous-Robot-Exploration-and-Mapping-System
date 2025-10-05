@@ -117,39 +117,37 @@ class MazeTargetRunner(MazeExplorer):
                 self.ep_gimbal.moveto(yaw=0, pitch=-15).wait_for_completed()
             except Exception:
                 pass
-            self.detect_and_shot_no_tof()
+            self.detect_and_shot()
 
-            
-    # --- เล็งและยิงแบบไม่ใช้ ToF ระหว่างเล็ง ---
-    def detect_and_shot_no_tof(self, timeout_s=8.0):
+    def detect_and_shot(self, timeout_s=8.0):
+        """ยิงเป้าหมายโดยใช้ ToF เหมือน LAB1"""
         pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
         pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
-
+        
+        # รีเซ็ตกิมบอล
         self.ep_gimbal.recenter().wait_for_completed()
-        self.ep_gimbal.drive_speed(0,0)  # ensure stop
-        time.sleep(0.2)
-
-        t0 = time.monotonic()
+        timebefore = time.monotonic()
         have_object = False
         self.ep_camera.start_video_stream(display=False, resolution="720p")
-
+        
         center_x = center_y = None
         err_x = err_y = 0.0
         self.last_time = time.monotonic()
-
+        
         while True:
             # === อ่านภาพ ===
             try:
                 img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
                 if img is None:
-                    if time.monotonic() - t0 > timeout_s: break
                     continue
             except Exception:
-                if time.monotonic() - t0 > timeout_s: break
                 continue
 
-            # === เหมือน LAB1: สร้าง mask หา shape ตาม target_color/target_shape ===
-            import cv2, numpy as np  # local import
+            # อ่านระยะ ToF
+            tof_dist = self.tof_handler.get_distance()
+                
+            # === สร้าง mask หา shape ตาม target_color/target_shape ===
+            import cv2, numpy as np
             color_key = self.target_color
             if self.target_color in self.colors:
                 color_key = self.colors[self.target_color]
@@ -159,17 +157,17 @@ class MazeTargetRunner(MazeExplorer):
 
             h, w = img.shape[:2]
             blur = cv2.GaussianBlur(img, (5,5), 0)
-            hsv  = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-
+            hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+            
             lower = np.array(self.color_ranges[color_key][0])
             upper = np.array(self.color_ranges[color_key][1])
-            mask  = cv2.inRange(hsv, lower, upper)
+            mask = cv2.inRange(hsv, lower, upper)
             kernel = np.ones((5,5), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-
+            
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
+            
             center_x = center_y = None
             for cnt in contours:
                 if cv2.contourArea(cnt) < 200:
@@ -177,7 +175,7 @@ class MazeTargetRunner(MazeExplorer):
                 per = cv2.arcLength(cnt, True)
                 approx = cv2.approxPolyDP(cnt, 0.02 * per, True)
                 vtx = len(approx)
-
+                
                 shape = None
                 if vtx >= 8:
                     area = cv2.contourArea(cnt)
@@ -189,50 +187,54 @@ class MazeTargetRunner(MazeExplorer):
                     x,y,wb,hb = cv2.boundingRect(cnt)
                     ar = float(wb)/hb
                     if 0.9 <= ar <= 1.1: shape = 'square'
-                    elif ar > 1.3:       shape = 'horizontal_rectangle'
-                    elif ar < 0.7:       shape = 'vertical_rectangle'
-                    else:                shape = 'rectangle'
-
+                    elif ar > 1.3: shape = 'horizontal_rectangle'
+                    elif ar < 0.7: shape = 'vertical_rectangle'
+                    else: shape = 'rectangle'
+                    
                 if shape == self.target_shape:
                     x,y,wb,hb = cv2.boundingRect(cnt)
                     center_x = x + wb//2
                     center_y = y + hb//2
                     break
 
-            # === คุมกิมบอลด้วย PID ไม่อิง ToF ===
+            # === คุมกิมบอลด้วย PID + ToF ===
             now = time.monotonic()
-            dt  = max(1e-3, now - self.last_time)
+            dt = max(1e-3, now - self.last_time)
             self.last_time = now
-
+            
             cx, cy = w//2, h//2
             if center_x is not None and center_y is not None:
                 have_object = True
                 err_x = (center_x - cx)
                 err_y = (center_y - cy)
-                yaw_cmd   = pid_yaw.step(err_x, dt)
-                pitch_cmd = pid_pitch.step(err_y, dt)
-
-                # ขยับกิมบอลเล็กน้อยจนเข้าเป้า
-                if abs(err_x) > 6 or abs(err_y) > 6:
-                    self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
-                else:
-                    # อยู่กลางพอดี -> ยิงและจบ
-                    self.ep_gimbal.drive_speed(0,0)
-                    self.ep_blaster.fire(times=3)
-                    self.ep_gimbal.move(pitch=0, yaw=-15).wait_for_completed()
-                    self.record_target_hit(self.target_color, self.target_shape)
-                    break
+                
+                # ตรวจสอบระยะ ToF
+                if 300 < tof_dist < 1000:
+                    yaw_cmd = pid_yaw.step(err_x, dt)
+                    pitch_cmd = pid_pitch.step(err_y, dt)
+                    
+                    if abs(err_x) > 6 or abs(err_y) > 6:
+                        self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
+                    else:
+                        # อยู่กลางพอดีและระยะ ToF เหมาะสม -> ยิง
+                        self.ep_gimbal.drive_speed(0,0)
+                        self.ep_blaster.fire(times=3)
+                        self.ep_gimbal.move(pitch=0, yaw=-15).wait_for_completed()
+                        self.record_target_hit(self.target_color, self.target_shape)
+                        break
             else:
-                # ยังไม่เห็น/หลุดเป้า
                 pid_yaw.integ *= 0.9
                 pid_pitch.integ *= 0.9
                 self.ep_gimbal.drive_speed(0,0)
-
-            if time.monotonic() - t0 > timeout_s and not have_object:
+                
+            # เช็คเวลาเหมือน LAB1
+            if time.monotonic() - timebefore < 10.0 and have_object:
+                continue
+            elif time.monotonic() - timebefore > 3.0 and not have_object:
                 print("⏱️ หมดเวลาเล็ง (ยังไม่เห็นเป้า)")
                 break
-
-        self.ep_gimbal.drive_speed(0,0)
+                
+    self.ep_gimbal.drive_speed(0,0)
         
     @staticmethod
     def _infer_yaw_from_path(visited_path):
