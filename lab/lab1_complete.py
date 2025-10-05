@@ -368,12 +368,12 @@ class MazeExplorer:
         
         # Color ranges (HSV)
         self.color_ranges = {
-            'brown_red': ([0, 120, 70], [25, 255, 255]),
-            'dark_green': ([40, 60, 20], [85, 255, 180]),
-            'yellow_brown': ([18, 100, 100], [40, 255, 255]),
-            'dark_blue': ([95, 70, 20], [130, 255, 200])
+            'brown_red': ( ([0, 120, 70],  [10, 255, 255]),
+                        ([170, 120, 70],[180, 255, 255]) ),  # แดง 2 ช่วง
+            'dark_green': ([40, 60, 20],   [85, 255, 180]),
+            'yellow_brown': ([18, 100, 100],[40, 255, 255]),
+            'dark_blue': ([95, 70, 20],    [130, 255, 200])
         }
-        
         
         # Color mapping
         self.colors = {
@@ -435,9 +435,15 @@ class MazeExplorer:
                 color_data = self.color_ranges[color_key]
                 
                 # สร้าง mask จากช่วงสี
-                lower_bound = np.array(color_data[0])
-                upper_bound = np.array(color_data[1])
-                mask = cv2.inRange(hsv, lower_bound, upper_bound)
+                if isinstance(color_data, tuple):
+                    (lower1, upper1), (lower2, upper2) = color_data
+                    mask1 = cv2.inRange(hsv, np.array(lower1, dtype=np.uint8), np.array(upper1, dtype=np.uint8))
+                    mask2 = cv2.inRange(hsv, np.array(lower2, dtype=np.uint8), np.array(upper2, dtype=np.uint8))
+                    mask = cv2.bitwise_or(mask1, mask2)
+                else:
+                    lower_bound = np.array(color_data[0], dtype=np.uint8)
+                    upper_bound = np.array(color_data[1], dtype=np.uint8)
+                    mask = cv2.inRange(hsv, lower_bound, upper_bound)
                 kernel = np.ones((5, 5), np.uint8)
                 mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
                 mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
@@ -780,7 +786,7 @@ class MazeExplorer:
         self.internal_map.mark_explored(self.current_position)
         
         wall_distances = {}
-        self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
+        self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
         direction_to_skip = -1
         if previous_position:
             print(f"   -> Path from {previous_position} is known. Adding connection automatically.")
@@ -1164,7 +1170,7 @@ class MazeExplorer:
         self.ep_led.set_led(r=0, g=0, b=255)
         for i in range(len(path) - 1):
             if self.current_position in self.visited_for_check:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
             self.visited_for_check.append(self.current_position)
             start_node, end_node = path[i], path[i+1]
@@ -1226,7 +1232,7 @@ class MazeExplorer:
 
             self.set_target('green', 'square')
             while True:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
                 
                 if self.current_position not in self.internal_map.explored:
                     previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
