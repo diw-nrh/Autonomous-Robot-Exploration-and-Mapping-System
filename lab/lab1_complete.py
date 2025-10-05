@@ -392,22 +392,126 @@ class MazeExplorer:
         self.target_shape = shape
 
     def detect_and_shot(self):
-        # Avoid issuing a zero-distance chassis move here to prevent overlapping actions
-        aim_grid = (self.current_position, self.current_orientation, self.target_color, self.target_shape)
-        if aim_grid not in self.shoot_grid:
-            pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
-            pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
-            pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
+        """
+        Phase 1: สแกนทั้งภาพ เก็บวัตถุทั้งหมดของกริดปัจจุบันลง self.shoot_grid ในรูปแบบ
+                 (pos, orientation, [(color, shape), ...])
+        Phase 2: ถ้ามี (target_color, target_shape) ในรายการของกริดนี้ ค่อยเข้า loop หลักเล็ง/ยิง
+        """
+
+        # -------- Phase 1: Full-frame scan to populate shoot_grid --------
+        if not isinstance(self.shoot_grid, list):
+            self.shoot_grid = []
+
+        detections = []  # list[(user_color, shape, (cx,cy))]
+        try:
             self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-            tof_dist = self.tof_handler.get_distance()
-            self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
-            center_x = center_y = None
-            err_x = err_y = 0.0
-            yaw_cmd = pitch_cmd = 0.0
-            have_object = False  # เพิ่มการประกาศตัวแปร
             time.sleep(0.5)
-            timebefore = time.monotonic()
-            while True:
+            img_full = self.ep_camera.read_cv2_image(strategy="newest", timeout=2)
+        except queue.Empty:
+            img_full = None
+
+        if img_full is not None:
+            blur_full = cv2.GaussianBlur(img_full, (5, 5), 0)
+            hsv_full = cv2.cvtColor(blur_full, cv2.COLOR_BGR2HSV)
+
+            def build_mask(hsv_img, color_data):
+                is_dual = (
+                    isinstance(color_data, tuple)
+                    and len(color_data) == 2
+                    and all(isinstance(r, (list, tuple, np.ndarray)) and len(r) == 2 for r in color_data)
+                )
+                if is_dual:
+                    (l1, u1), (l2, u2) = color_data
+                    m1 = cv2.inRange(hsv_img, np.array(l1, np.uint8), np.array(u1, np.uint8))
+                    m2 = cv2.inRange(hsv_img, np.array(l2, np.uint8), np.array(u2, np.uint8))
+                    return cv2.bitwise_or(m1, m2)
+                lb = np.array(color_data[0], np.uint8)
+                ub = np.array(color_data[1], np.uint8)
+                return cv2.inRange(hsv_img, lb, ub)
+
+            def classify_shape(cnt):
+                area = cv2.contourArea(cnt)
+                if area < 150:
+                    return None
+                peri = cv2.arcLength(cnt, True)
+                approx = cv2.approxPolyDP(cnt, 0.02 * max(1.0, peri), True)
+                v = len(approx)
+                if v == 3:
+                    return 'triangle'
+                if v == 4:
+                    x, y, wb, hb = cv2.boundingRect(cnt)
+                    ar = float(wb) / max(1.0, hb)
+                    if 0.85 <= ar <= 1.15:
+                        return 'square'
+                    elif ar > 1.15:
+                        return 'horizontal_rectangle'
+                    else:
+                        return 'vertical_rectangle'
+                if v >= 8:
+                    circ = 4.0 * np.pi * area / max(peri * peri, 1e-6)
+                    if circ > 0.7:
+                        return 'circle'
+                return None
+
+            reverse_color = {v: k for k, v in self.colors.items()} if hasattr(self, 'colors') else {}
+
+            for color_key, color_data in self.color_ranges.items():
+                mask = build_mask(hsv_full, color_data)
+                kernel = np.ones((3, 3), np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    shp = classify_shape(cnt)
+                    if not shp:
+                        continue
+                    x, y, wb, hb = cv2.boundingRect(cnt)
+                    cx, cy = x + wb // 2, y + hb // 2
+                    user_color = reverse_color.get(color_key, color_key)
+                    detections.append((user_color, shp, (cx, cy)))
+                
+
+        # --- merge เข้ารูปแบบใหม่ของ shoot_grid: (pos, ori, [(color,shape), ...]) ---
+        pos = self.current_position
+        ori = self.current_orientation
+        entry_idx = None
+        for i, entry in enumerate(self.shoot_grid):
+            if len(entry) == 4:
+                # migrate เก่า -> ใหม่
+                p, o, c_old, s_old = entry
+                self.shoot_grid[i] = (p, o, [(c_old, s_old)])
+                entry = self.shoot_grid[i]
+            if len(entry) == 3 and entry[0] == pos and entry[1] == ori:
+                entry_idx = i
+                break
+        if entry_idx is None:
+            self.shoot_grid.append((pos, ori, []))
+            entry_idx = len(self.shoot_grid) - 1
+
+        p, o, cs_list = self.shoot_grid[entry_idx]
+        # ไม่ dedupe ด้วย set อีกต่อไป เพื่อให้เก็บ "หลายอันชนิดเดียวกัน" ได้
+        for c, s, _center in detections:
+            cs_list.append((c, s))
+        self.shoot_grid[entry_idx] = (p, o, cs_list)
+
+        # gate เข้า Phase 2 เฉพาะเมื่อมีคู่เป้าหมายอย่างน้อยหนึ่งตัว
+        if (self.target_color, self.target_shape) not in cs_list:
+            print(f"⚠️ ไม่พบ {self.target_color}-{self.target_shape} ในกริด {pos} ori={ori}; ข้ามการเล็งยิง")
+            return None
+        print(self.shoot_grid)
+        # -------- Phase 2: Original aim and fire loop --------
+        pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
+        pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
+        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+        tof_dist = self.tof_handler.get_distance()
+        self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+        center_x = center_y = None
+        err_x = err_y = 0.0
+        yaw_cmd = pitch_cmd = 0.0
+        have_object = False  # เพิ่มการประกาศตัวแปร
+        time.sleep(0.5)
+        timebefore = time.monotonic()
+        while True:
                 try:
                     img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
                     if img is None:
@@ -547,11 +651,11 @@ class MazeExplorer:
                         time.sleep(1)
                         self.ep_blaster.fire(times=3)
                         time.sleep(1)
-                        self.record_target_hit(self.target_color, self.target_shape)  # NEW
+                        self.record_target_hit(self.target_color, self.target_shape)  # recorded
                         self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
                         self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
                         cv2.destroyAllWindows()
-                        self.shoot_grid.append((self.current_position, self.current_orientation, self.target_color, self.target_shape,))
+                        # no legacy append to shoot_grid here; Phase 1 already stored entries
                         break
 
                 elif center_x is None and center_y is None and time.monotonic() - timebefore < 10.0 and have_object and tof_dist < 1000 and tof_dist > 300:
@@ -572,9 +676,7 @@ class MazeExplorer:
                     break
                 # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
                 center_x = center_y = None
-        else:
-            print("🎯 Target already engaged in this grid.")
-            return None  
+        # end detect_and_shot
     # -------------------- Continuous Sensor Logging (NEW) --------------------
     def _continuous_log_worker(self, frequency_hz=10):
         print(f"[Logging Thread] Started. Logging at {frequency_hz} Hz.")
@@ -1038,6 +1140,71 @@ class MazeExplorer:
                 sx, sy = self.visited_path[0]
                 self.ax.scatter([sx], [sy], s=120, c='green', marker='o', zorder=5, label='Start')
 
+            # วาด object markers แบบเดียวกับ plot_map_with_walls
+            if self.shoot_grid:
+                blocked_edges = set(self.internal_map.blocked)
+                width, height = self.border
+
+                def border_center(x, y, orientation):
+                    if orientation == 0:   return (x, height - 0.5)   # ชนขอบบน
+                    if orientation == 2:   return (x, -0.5)           # ชนขอบล่าง
+                    if orientation == 1:   return (width - 0.5, y)    # ชนขอบขวา
+                    if orientation == 3:   return (-0.5, y)           # ชนขอบซ้าย
+                    return (x, y)
+
+                for entry in self.shoot_grid:
+                    # รองรับทั้งโครงสร้างเก่าและใหม่
+                    if len(entry) == 4 and isinstance(entry[2], str):
+                        pos, orientation, color, shape = entry
+                        cs_iter = [(color, shape)]
+                    elif len(entry) == 3 and isinstance(entry[2], list):
+                        pos, orientation, cs_iter = entry
+                    else:
+                        continue
+
+                    x, y = pos
+                    if orientation == 0:
+                        dx, dy = 0, 1
+                    elif orientation == 1:
+                        dx, dy = 1, 0
+                    elif orientation == 2:
+                        dx, dy = 0, -1
+                    else:
+                        dx, dy = -1, 0
+
+                    cx, cy = x, y
+                    mx = my = None
+                    while True:
+                        nx, ny = cx + dx, cy + dy
+                        out_of_bounds = not (0 <= nx < width and 0 <= ny < height)
+                        if out_of_bounds:
+                            mx, my = border_center(cx, cy, orientation)
+                            break
+                        edge = tuple(sorted([(cx, cy), (nx, ny)]))
+                        if edge in blocked_edges:
+                            mx, my = (cx + nx) / 2.0, (cy + ny) / 2.0
+                            break
+                        cx, cy = nx, ny
+
+                    if mx is None or my is None:
+                        continue
+
+                    # นำ offset ตามทิศ เพื่อไม่ให้ดาวทับเส้นกำแพง
+                    offset = 0.10
+                    if orientation == 0:
+                        ox, oy = 0.0, -offset
+                    elif orientation == 1:
+                        ox, oy = -offset, 0.0
+                    elif orientation == 2:
+                        ox, oy = 0.0, offset
+                    else:
+                        ox, oy = offset, 0.0
+                    mx_off, my_off = mx + ox, my + oy
+
+                    for color, shape in cs_iter:
+                        self.ax.scatter(mx_off, my_off, color='gold', s=180, marker='*', edgecolors='black', zorder=6)
+                        self.ax.text(mx_off, my_off - 0.06, f"{color} {shape}", color='black', ha='center', va='top', fontsize=9, zorder=7)
+
             self.ax.legend(loc='upper right', bbox_to_anchor=(1, 1))
             
             # อัปเดตแผนที่
@@ -1081,11 +1248,13 @@ class MazeExplorer:
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
         if wall_left:
-            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m - 0.03
+            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m +0.03
+            print(f"left {-move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
         elif wall_right:
-            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m - 0.03
+            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m +0.03
+            print(f"right {move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
 
@@ -1269,7 +1438,7 @@ class MazeExplorer:
         finally:
             self.save_targets_json()
             self.save_map_state_json()
-
+            print(self.shoot_grid)
             print("\n--- Final Marker Map ---")
 
             # ปิด real-time plot และบันทึกแผนที่สุดท้าย
@@ -1284,17 +1453,16 @@ class MazeExplorer:
 # ==============================================================================
 
     def plot_map_with_walls(self, filename="maze_map.png"):
-        import matplotlib.pyplot as plt
-
+        """วาดแผนที่สุดท้ายพร้อมกำแพง เส้นทาง และ markers โดยใช้สถานะภายในออบเจ็กต์"""
         graph = self.internal_map.graph
         blocked = self.internal_map.blocked
         path = self.visited_path
-        width, height = self.border  # ใช้ขอบเขตแผนที่จาก border
+        width, height = self.border
 
         plt.figure(figsize=(8, 8))
         plt.title("Robot Map with Walls and Path")
 
-        # วาด edges (ทางเดินเปิด)
+        # วาดเส้นทางเปิดจากกราฟ (หลีกเลี่ยงซ้ำขอบเดียวกัน)
         drawn = set()
         for a, nbs in graph.items():
             for b in nbs:
@@ -1304,20 +1472,20 @@ class MazeExplorer:
                 drawn.add(edge)
                 x1, y1 = a
                 x2, y2 = b
-                plt.plot([x1, x2], [y1, y2], 'b-', linewidth=1.2, alpha=0.5, zorder=1)
+                plt.plot([x1, x2], [y1, y2], linewidth=1.2, alpha=0.5, zorder=1)
 
-        # วาดกำแพง (blocked)
+        # วาดกำแพงจาก blocked edges
         for (a, b) in sorted(blocked):
             (x1, y1), (x2, y2) = a, b
             dx, dy = x2 - x1, y2 - y1
             if dx == 0 and abs(dy) == 1:
                 y_mid = (y1 + y2) / 2.0
-                plt.plot([x1 - 0.5, x1 + 0.5], [y_mid, y_mid], 'k-', linewidth=3.0, zorder=3)
+                plt.plot([x1 - 0.5, x1 + 0.5], [y_mid, y_mid], linewidth=3.0, color="k", zorder=3)
             elif dy == 0 and abs(dx) == 1:
                 x_mid = (x1 + x2) / 2.0
-                plt.plot([x_mid, x_mid], [y1 - 0.5, y1 + 0.5], 'k-', linewidth=3.0, zorder=3)
+                plt.plot([x_mid, x_mid], [y1 - 0.5, y1 + 0.5], linewidth=3.0, color="k", zorder=3)
 
-        # วาดโหนดที่สำรวจแล้ว
+        # วาดโหนด
         if graph:
             xs, ys = zip(*graph.keys())
             plt.scatter(xs, ys, s=36, color="tab:blue", zorder=2, label="Nodes")
@@ -1325,39 +1493,85 @@ class MazeExplorer:
         # วาดเส้นทางที่เดิน
         if path:
             px, py = zip(*path)
-            plt.plot(px, py, 'r-', linewidth=2, zorder=4, label='Path')
-            plt.scatter(px[0], py[0], s=120, c='green', marker='o', zorder=5, label='Start')
-            plt.scatter(px[-1], py[-1], s=120, c='purple', marker='X', zorder=5, label='End')
+            plt.plot(px, py, linewidth=2, color="tab:red", zorder=4, label="Path")
+            plt.scatter(px[0], py[0], s=120, color="green", marker='o', zorder=5, label='Start')
+            plt.scatter(px[-1], py[-1], s=120, color="purple", marker='X', zorder=5, label='End')
 
-        # วาด markers จาก shoot_grid (เลื่อนตาม orientation จนสุดขอบ/ชนกำแพง)
+        # วาด markers จาก shoot_grid (รองรับทั้งโครงสร้างเก่าและใหม่)
         if self.shoot_grid:
-            blocked_cells = set()
-            for (a, b) in blocked:
-                blocked_cells.add(a)
-                blocked_cells.add(b)
+            blocked_edges = set(blocked)
+            markers_by_wall = {}
 
-            for (pos, orientation, color, shape) in self.shoot_grid:
+            def add_marker(mx, my, text):
+                key = (mx, my)
+                markers_by_wall.setdefault(key, []).append(text)
+
+            def border_center(x, y, orientation):
+                if orientation == 0:   return (x, height - 0.5)   # North border
+                if orientation == 2:   return (x, -0.5)           # South border
+                if orientation == 1:   return (width - 0.5, y)    # East border
+                if orientation == 3:   return (-0.5, y)           # West border
+                return (x, y)
+
+            for entry in self.shoot_grid:
+                # โครงสร้างเก่า: (pos, orientation, color, shape)
+                if len(entry) == 4 and isinstance(entry[2], str):
+                    pos, orientation, color, shape = entry
+                    cs_iter = [(color, shape)]
+                # โครงสร้างใหม่: (pos, orientation, [(color,shape), ...])
+                elif len(entry) == 3 and isinstance(entry[2], list):
+                    pos, orientation, cs_iter = entry
+                else:
+                    continue
+
                 x, y = pos
-                dx, dy = 0, 0
-                if orientation == 0:   dx, dy = 0, 1   # N
-                elif orientation == 1: dx, dy = 1, 0   # E
-                elif orientation == 2: dx, dy = 0, -1  # S
-                elif orientation == 3: dx, dy = -1, 0  # W
+                # ทิศ -> เวกเตอร์การเดิน
+                if orientation == 0:
+                    dx, dy = 0, 1
+                elif orientation == 1:
+                    dx, dy = 1, 0
+                elif orientation == 2:
+                    dx, dy = 0, -1
+                else:
+                    dx, dy = -1, 0
 
-                mx, my = x, y
+                cx, cy = x, y
+                mx = my = None
                 while True:
-                    next_pos = (mx + dx, my + dy)
-                    print(next_pos)
-                    out_of_bounds = not (0 <= next_pos[0] < width and 0 <= next_pos[1] < height)
-                    if out_of_bounds or next_pos in blocked_cells:
+                    nx, ny = cx + dx, cy + dy
+                    out_of_bounds = not (0 <= nx < width and 0 <= ny < height)
+                    if out_of_bounds:
+                        mx, my = border_center(cx, cy, orientation)
                         break
-                    mx, my = next_pos
+                    edge = tuple(sorted([(cx, cy), (nx, ny)]))
+                    if edge in blocked_edges:
+                        mx, my = (cx + nx) / 2.0, (cy + ny) / 2.0
+                        break
+                    cx, cy = nx, ny
 
-                # ขยับเล็กน้อยไม่ให้ทับกำแพง
-                shift_x = 0.3 if dx == 0 else 0
-                shift_y = 0.3 if dy == 0 else 0
-                plt.scatter(mx + shift_x, my + shift_y, color='gold', s=180, marker='*', edgecolors='black', zorder=6)
-                plt.text(mx + shift_x, my + shift_y + 0.35, f'{color}-{shape}', color='black', ha='center', fontsize=9, zorder=7)
+                if mx is None or my is None:
+                    continue
+
+                # Apply a small offset to move the star away from the wall/border for visibility
+                offset = 0.10
+                if orientation == 0:      # N → nudge slightly downward (into the cell)
+                    ox, oy = 0.0, -offset
+                elif orientation == 1:    # E → nudge slightly left
+                    ox, oy = -offset, 0.0
+                elif orientation == 2:    # S → nudge slightly upward
+                    ox, oy = 0.0, offset
+                else:                      # W → nudge slightly right
+                    ox, oy = offset, 0.0
+
+                mx_off, my_off = mx + ox, my + oy
+                for color, shape in cs_iter:
+                    add_marker(mx_off, my_off, f"{color} {shape}")
+
+            # วาด marker รวมบนผนังตำแหน่งเดียวกัน
+            for (mx, my), texts in markers_by_wall.items():
+                plt.scatter(mx, my, color='gold', s=180, marker='*', edgecolors='black', zorder=6)
+                # Place text just below the star marker for readability
+                plt.text(mx, my - 0.06, '\n'.join(texts), color='black', ha='center', va='top', fontsize=9, zorder=7)
 
         plt.gca().set_aspect('equal', adjustable='box')
         plt.grid(True, alpha=0.3)
@@ -1365,6 +1579,7 @@ class MazeExplorer:
         plt.savefig(filename, dpi=150)
         print(f"Map saved to '{filename}'")
         plt.close()
+
 
 
 
