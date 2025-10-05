@@ -1238,9 +1238,9 @@ class MazeExplorer:
                 print(f"\n--- EXPLORATION COMPLETE! All areas explored ---")
                 
                 self.ep_led.set_led(r=0, g=255, b=0, effect="on")
-                time.sleep(0.1)
+                time.sleep(0.5)
                 self.ep_camera.stop_video_stream()
-                time.sleep(0.1)
+                time.sleep(0.5)
                 A=self.shoot_grid
                 print(A)
                 break
