@@ -797,7 +797,7 @@ class MazeExplorer:
         self.internal_map.mark_explored(self.current_position)
         
         wall_distances = {}
-        self.periodic_wall_clearance_adjust(target_clearance_m=0.19)
+        self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
         direction_to_skip = -1
         if previous_position:
             print(f"   -> Path from {previous_position} is known. Adding connection automatically.")
@@ -1068,27 +1068,26 @@ class MazeExplorer:
         """
         print("   Checking wall clearances using ToF and IR sensors...")
         
-        # อ่านค่าจากเซ็นเซอร์
 
         # ToF หน้า
         front_distance_mm = self.tof_handler.get_distance()
 
         wall_left, wall_right, sharp_left_dist, sharp_right_dist = self._read_ir_sensors()
         print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left_dist:.1f}mm, Right={sharp_right_dist:.1f}mm")
-        print(f"   Left={sharp_left_dist}, Right={sharp_right_dist}")
+        print(f"   Left={sharp_left_dist}, Right={sharp_right_dist}",wall_left,wall_right)
         # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
         if front_distance_mm < WALL_THRESHOLD_MM:
             move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
             if abs(move_dist_m) > 0.05:
-                self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=1).wait_for_completed()
+                self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
         if wall_left:
             move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m - 0.03
             if abs(move_dist_m) > 0.05:
-                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=1).wait_for_completed()
+                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
         elif wall_right:
             move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m - 0.03
             if abs(move_dist_m) > 0.05:
-                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=1).wait_for_completed()
+                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
 
     # ========================================================================
     # Movement and PID Control Functions
@@ -1181,7 +1180,7 @@ class MazeExplorer:
         self.ep_led.set_led(r=0, g=0, b=255)
         for i in range(len(path) - 1):
             if self.current_position in self.visited_for_check:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.19)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
             self.visited_for_check.append(self.current_position)
             start_node, end_node = path[i], path[i+1]
@@ -1243,7 +1242,7 @@ class MazeExplorer:
 
             self.set_target('green', 'square')
             while True:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.19)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
                 
                 if self.current_position not in self.internal_map.explored:
                     previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
@@ -1276,12 +1275,7 @@ class MazeExplorer:
             # ปิด real-time plot และบันทึกแผนที่สุดท้าย
             self.close_real_time_plot()
             
-            plot_map_with_walls(
-                self.internal_map.graph,
-                self.internal_map.blocked,
-                self.visited_path,
-                filename="maze_map.png"
-            )
+            self.plot_map_with_walls(filename="maze_map.png")
 
             self.save_csv_logs()
 
@@ -1289,65 +1283,89 @@ class MazeExplorer:
 # Map Visualization Functions
 # ==============================================================================
 
-def plot_map_with_walls(graph, blocked, path, filename="maze_map.png"):
-    """
-    วาดแผนที่สุดท้ายพร้อมกำแพง เส้นทาง และ markers
-    
-    Args:
-        graph: กราฟของเส้นทางที่เดินได้
-        blocked: เส้นทางที่ถูกกำแพงปิด
-        path: เส้นทางที่หุ่นเดิน
-        marker_map: markers ที่พบ
-        filename: ชื่อไฟล์ที่ต้องการบันทึก
-    """
-    plt.figure(figsize=(8, 8))
-    plt.title("Robot Map with Walls and Path")
+    def plot_map_with_walls(self, filename="maze_map.png"):
+        import matplotlib.pyplot as plt
 
-    # วาด “ทางเปิด” จาก graph (เส้นบาง)
-    drawn = set()
-    for a, nbs in graph.items():
-        for b in nbs:
-            edge = tuple(sorted([a, b]))
-            if edge in drawn:
-                continue
-            drawn.add(edge)
-            x1, y1 = a
-            x2, y2 = b
-            plt.plot([x1, x2], [y1, y2], linewidth=1.2, alpha=0.5, zorder=1)
+        graph = self.internal_map.graph
+        blocked = self.internal_map.blocked
+        path = self.visited_path
+        width, height = self.border  # ใช้ขอบเขตแผนที่จาก border
 
-    # วาด “กำแพงปิด” จาก blocked (เส้นหนา)
-    for edge in blocked:
-        (x1, y1), (x2, y2) = edge
-        dx, dy = x2 - x1, y2 - y1
-        if dx == 0 and abs(dy) == 1:
-            # แนวเดียวกันคอลัมน์ (เหนือ-ใต้) -> กำแพงแนวนอนที่กึ่งกลาง
-            y_mid = (y1 + y2) / 2.0
-            plt.plot([x1 - 0.5, x1 + 0.5], [y_mid, y_mid], linewidth=3.0, color="k", zorder=3)
-        elif dy == 0 and abs(dx) == 1:
-            # แนวเดียวกันแถว (ซ้าย-ขวา) -> กำแพงแนวตั้งที่กึ่งกลาง
-            x_mid = (x1 + x2) / 2.0
-            plt.plot([x_mid, x_mid], [y1 - 0.5, y1 + 0.5], linewidth=3.0, color="k", zorder=3)
+        plt.figure(figsize=(8, 8))
+        plt.title("Robot Map with Walls and Path")
 
-    # โหนด
-    if graph:
-        xs, ys = zip(*graph.keys())
-        plt.scatter(xs, ys, s=36, color="tab:blue", zorder=2, label="Nodes")
+        # วาด edges (ทางเดินเปิด)
+        drawn = set()
+        for a, nbs in graph.items():
+            for b in nbs:
+                edge = tuple(sorted([a, b]))
+                if edge in drawn:
+                    continue
+                drawn.add(edge)
+                x1, y1 = a
+                x2, y2 = b
+                plt.plot([x1, x2], [y1, y2], 'b-', linewidth=1.2, alpha=0.5, zorder=1)
 
-    # เส้นทางที่เดิน
-    if path:
-        px, py = zip(*path)
-        plt.plot(px, py, linewidth=2, color="tab:red", zorder=4, label="Path")
-        plt.scatter(px[0], py[0], s=120, color="green", marker='o', zorder=5, label='Start')
-        plt.scatter(px[-1], py[-1], s=120, color="purple", marker='X', zorder=5, label='End')
-        
+        # วาดกำแพง (blocked)
+        for (a, b) in sorted(blocked):
+            (x1, y1), (x2, y2) = a, b
+            dx, dy = x2 - x1, y2 - y1
+            if dx == 0 and abs(dy) == 1:
+                y_mid = (y1 + y2) / 2.0
+                plt.plot([x1 - 0.5, x1 + 0.5], [y_mid, y_mid], 'k-', linewidth=3.0, zorder=3)
+            elif dy == 0 and abs(dx) == 1:
+                x_mid = (x1 + x2) / 2.0
+                plt.plot([x_mid, x_mid], [y1 - 0.5, y1 + 0.5], 'k-', linewidth=3.0, zorder=3)
 
+        # วาดโหนดที่สำรวจแล้ว
+        if graph:
+            xs, ys = zip(*graph.keys())
+            plt.scatter(xs, ys, s=36, color="tab:blue", zorder=2, label="Nodes")
 
-    plt.gca().set_aspect('equal', adjustable='box')
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc='best')
-    plt.savefig(filename, dpi=150)
-    print(f"Map saved to '{filename}'")
-    plt.close()
+        # วาดเส้นทางที่เดิน
+        if path:
+            px, py = zip(*path)
+            plt.plot(px, py, 'r-', linewidth=2, zorder=4, label='Path')
+            plt.scatter(px[0], py[0], s=120, c='green', marker='o', zorder=5, label='Start')
+            plt.scatter(px[-1], py[-1], s=120, c='purple', marker='X', zorder=5, label='End')
+
+        # วาด markers จาก shoot_grid (เลื่อนตาม orientation จนสุดขอบ/ชนกำแพง)
+        if self.shoot_grid:
+            blocked_cells = set()
+            for (a, b) in blocked:
+                blocked_cells.add(a)
+                blocked_cells.add(b)
+
+            for (pos, orientation, color, shape) in self.shoot_grid:
+                x, y = pos
+                dx, dy = 0, 0
+                if orientation == 0:   dx, dy = 0, 1   # N
+                elif orientation == 1: dx, dy = 1, 0   # E
+                elif orientation == 2: dx, dy = 0, -1  # S
+                elif orientation == 3: dx, dy = -1, 0  # W
+
+                mx, my = x, y
+                while True:
+                    next_pos = (mx + dx, my + dy)
+                    print(next_pos)
+                    out_of_bounds = not (0 <= next_pos[0] < width and 0 <= next_pos[1] < height)
+                    if out_of_bounds or next_pos in blocked_cells:
+                        break
+                    mx, my = next_pos
+
+                # ขยับเล็กน้อยไม่ให้ทับกำแพง
+                shift_x = 0.3 if dx == 0 else 0
+                shift_y = 0.3 if dy == 0 else 0
+                plt.scatter(mx + shift_x, my + shift_y, color='gold', s=180, marker='*', edgecolors='black', zorder=6)
+                plt.text(mx + shift_x, my + shift_y + 0.35, f'{color}-{shape}', color='black', ha='center', fontsize=9, zorder=7)
+
+        plt.gca().set_aspect('equal', adjustable='box')
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc='best')
+        plt.savefig(filename, dpi=150)
+        print(f"Map saved to '{filename}'")
+        plt.close()
+
 
 
 if __name__ == '__main__':
