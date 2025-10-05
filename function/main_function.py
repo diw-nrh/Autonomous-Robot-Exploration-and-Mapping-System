@@ -320,16 +320,16 @@ class VisionDetector:
             cv2.imshow("Binary - Combined (ROI)", combined_mask)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-        # จัดกลุ่มและจัดเรียงจากซ้ายไปขวา
+        # จัดกลุ่มและจัดเรียงตามความน่าเชื่อถือ
         initial = self._cluster_initial(pooled)
-        initial.sort(key=lambda d: d["center"][0])  # เรียงจากซ้ายไปขวา
+        # ไม่เรียงตามตำแหน่ง ใช้ลำดับความน่าเชื่อถือจาก _cluster_initial
         
         print(f"📊 Total frames processed: {frame_count}")
         print(f"📊 Total detections: {len(pooled)}")
         print(f"📊 Clustered objects: {len(initial)}")
 
         # บันทึกวัตถุทั้งหมดจากซ้ายไปขวา พร้อมข้อมูลความน่าเชื่อถือ
-        print("\n💾 Saving reliable objects (Left to Right):")
+        print("\n💾 Saving reliable objects (by confidence):")
         for i, d in enumerate(initial):
             entry = {
                 "color": d["base_color"],
@@ -344,7 +344,7 @@ class VisionDetector:
             }
             self.shoot_target.append(entry)
             conf_str = f"conf:{entry['confidence']:.1f} count:{entry['detection_count']} area:{entry['area']}"
-            print(f"  {i+1}. {entry['color']} {entry['shape']} at {entry['center']} (x={entry['center'][0]}) [{conf_str}]")
+            print(f"  {i+1}. {entry['color']} {entry['shape']} at {entry['center']} [{conf_str}]")
 
         # STEP 2: หาและยิงเฉพาะวัตถุที่ต้องการ
         print(f"\n🎯 STEP 2: Looking for target: {self.target_color} {self.target_shape}")
@@ -356,20 +356,20 @@ class VisionDetector:
         elif target_shape == "vertical_rectangle":
             target_shape = "rectangle_v"
 
-        # หาวัตถุที่ตรงกับเป้าหมาย (เรียงจากซ้ายไปขวาแล้ว)
+        # หาวัตถุที่ตรงกับเป้าหมาย (เรียงตามลำดับที่เก็บไว้)
         targets_to_shoot = [d for d in self.shoot_target
                             if d["color"] == self.target_color and d["shape"] == target_shape]
         
         print(f"🎯 Found {len(targets_to_shoot)} matching targets:")
         for i, tgt in enumerate(targets_to_shoot):
-            print(f"  Target {i+1}: {tgt['color']} {tgt['shape']} at {tgt['center']} (x={tgt['center'][0]})")
+            print(f"  Target {i+1}: {tgt['color']} {tgt['shape']} at {tgt['center']}")
 
-        # เริ่มยิงเป้าหมาย (จากซ้ายไปขวา)
+        # เริ่มยิงเป้าหมาย (ตามลำดับที่เก็บไว้)
         if not targets_to_shoot:
             print("⚠️ No matching targets found!")
             return self.shoot_target
         
-        print(f"\n🔫 Starting to shoot {len(targets_to_shoot)} targets (Left to Right)...")
+        print(f"\n🔫 Starting to shoot {len(targets_to_shoot)} targets (in stored order)...")
         
         # ตั้งค่า PID controller
         pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=12.0)
@@ -377,16 +377,30 @@ class VisionDetector:
         camera_w = 640  # จะถูกปรับจากเฟรมแรก
         camera_h = 360
 
-        # ยิงทีละตัวจากซ้ายไปขวา พร้อมการหันหาอย่างรวดเร็ว
-        for idx, tgt in enumerate(targets_to_shoot):
+        # ยิงทีละตัวตามลำดับที่เก็บไว้
+        targets_remaining = targets_to_shoot.copy()  # สำเนารายการเป้าหมาย
+        target_index = 0
+        
+        while targets_remaining and target_index < len(targets_remaining):
+            tgt = targets_remaining[target_index]
             if self._already_shot(tgt["center"]):
-                print(f"🎯 Target {idx+1} already shot, skipping...")
+                print(f"🎯 Target {target_index+1} already shot, skipping...")
+                targets_remaining.pop(target_index)  # ลบเป้าหมายที่ยิงแล้วออกจากรายการ
                 continue
                 
-            print(f"\n🎯 Engaging Target {idx+1}/{len(targets_to_shoot)}: {tgt['color']} {tgt['shape']} at {tgt['center']}")
+            print(f"\n🎯 Engaging Target {target_index+1}/{len(targets_remaining)}: {tgt['color']} {tgt['shape']} at {tgt['center']}")
             
-            # หันหาเป้าหมายอย่างรวดเร็วก่อน (Pre-aim)
-            print(f"📍 Pre-aiming to target location...")
+            # ขั้นตอนที่ 1: Recenter กิมบาล
+            print(f"🔄 Recentering gimbal...")
+            try:
+                self.ep_gimbal.recenter().wait_for_completed()
+                time.sleep(0.5)
+                print(f"✅ Gimbal recentered")
+            except Exception as e:
+                print(f"⚠️ Recenter failed: {e}")
+            
+            # ขั้นตอนที่ 2: หันไปตำแหน่งเป้าหมายทันที (ไม่ใช้ฟังก์ชันความน่าเชื่อถือ)
+            print(f"📍 Direct aiming to stored position {tgt['center']}...")
             target_x, target_y = tgt["center"]
             
             # คำนวณมุมที่ต้องหันไป (สมมติกล้องอยู่กลางภาพ)
@@ -404,25 +418,27 @@ class VisionDetector:
                 delta_x = target_x - center_x
                 delta_y = target_y - center_y
                 
-                # หันไปทางเป้าหมายอย่างรวดเร็ว (ประมาณ 60% ของระยะทาง)
-                if abs(delta_x) > 50 or abs(delta_y) > 50:
+                # หันไปทางเป้าหมายอย่างรวดเร็ว (ประมาณ 70% ของระยะทาง)
+                if abs(delta_x) > 30 or abs(delta_y) > 30:
                     # ใช้ moveto สำหรับการเคลื่อนที่แบบรวดเร็ว
-                    yaw_move = delta_x * 0.08   # ปรับค่าตามความเหมาะสม
-                    pitch_move = -delta_y * 0.06  # ปรับค่าตามความเหมาะสม
+                    yaw_move = delta_x * 0.10   # เพิ่มความไวสำหรับการหันทันที
+                    pitch_move = -delta_y * 0.08  # เพิ่มความไวสำหรับการหันทันที
                     
                     # จำกัดการเคลื่อนที่
-                    yaw_move = max(-15, min(15, yaw_move))
-                    pitch_move = max(-10, min(10, pitch_move))
+                    yaw_move = max(-20, min(20, yaw_move))
+                    pitch_move = max(-15, min(15, pitch_move))
                     
-                    print(f"  🔄 Quick turn: yaw={yaw_move:.1f}°, pitch={pitch_move:.1f}°")
+                    print(f"  🔄 Direct turn to target: yaw={yaw_move:.1f}°, pitch={pitch_move:.1f}°")
                     try:
                         self.ep_gimbal.move(yaw=yaw_move, pitch=pitch_move).wait_for_completed()
-                        time.sleep(0.2)
+                        time.sleep(0.3)
+                        print(f"  ✅ Direct turn completed")
                     except Exception as e:
-                        print(f"  ⚠️ Pre-aim failed: {e}")
+                        print(f"  ⚠️ Direct turn failed: {e}")
             
-            # เริ่มการเล็งแบบละเอียดด้วย PID
-            print(f"🎯 Fine aiming with PID...")
+            # ขั้นตอนที่ 3: เข้าสู่ฟังก์ชันความน่าเชื่อถือ (PID Fine Aiming)
+            print(f"🎯 Entering reliability function - Fine aiming with PID...")
+            aim_timeout = 8.0  # กำหนดเวลา timeout สำหรับการเล็ง
             t_end = time.time() + aim_timeout
             last_seen = tgt["center"]
             aimed_successfully = False
@@ -504,14 +520,14 @@ class VisionDetector:
                         self._shot_centroids.append(last_seen)
                         tgt["shot"] = True
                         aimed_successfully = True
-                        print(f"✅ Target {idx+1} shot successfully!")
+                        print(f"✅ Target {target_index+1} shot successfully!")
                         break
                 else:
                     # ไม่เห็นเป้า -> รอสักครู่
                     time.sleep(0.05)
             
             if not aimed_successfully:
-                print(f"⚠️ Failed to shoot target {idx+1} within {aim_timeout}s timeout")
+                print(f"⚠️ Failed to shoot target {target_index+1} within {aim_timeout}s timeout")
                 
             # หยุดกิมบาลก่อนไปเป้าถัดไป
             try:
@@ -520,9 +536,27 @@ class VisionDetector:
                 pass
             time.sleep(0.3)
             
+            # ขั้นตอนที่ 4: ลบข้อมูลเป้าหมายที่ยิงสำเร็จออกจากรายการ
+            if aimed_successfully:
+                print(f"🗑️ Removing target {target_index+1} from list...")
+                targets_remaining.pop(target_index)
+                # ไม่เพิ่ม target_index เพราะรายการสั้นลงแล้ว
+                
+                # Recenter หลังจากยิงสำเร็จ
+                print(f"🔄 Post-shot recenter...")
+                try:
+                    self.ep_gimbal.recenter().wait_for_completed()
+                    time.sleep(0.5)
+                    print(f"✅ Post-shot recenter completed")
+                except Exception as e:
+                    print(f"⚠️ Post-shot recenter failed: {e}")
+            else:
+                # ถ้ายิงไม่สำเร็จ ไปเป้าถัดไป
+                target_index += 1
+            
             # แสดงความคืบหน้า
             shot_so_far = sum(1 for s in self.shoot_target if s["shot"])
-            print(f"📊 Progress: Shot {shot_so_far} targets so far")
+            print(f"📊 Progress: Shot {shot_so_far} targets, {len(targets_remaining)} targets remaining")
         
         print(f"\n🏁 STEP 2 COMPLETED: Finished shooting sequence!")
 
@@ -539,7 +573,7 @@ class VisionDetector:
         print(f"🔫 Successfully shot: {shot_count}/{target_count}")
         print(f"📈 Success rate: {(shot_count/target_count*100):.1f}%" if target_count > 0 else "📈 Success rate: N/A")
         
-        print(f"\n📝 DETAILED RESULTS (Left to Right):")
+        print(f"\n📝 DETAILED RESULTS (by reliability):")
         for i, s in enumerate(self.shoot_target, 1):
             is_target = (s["color"] == self.target_color and s["shape"] == target_shape)
             target_marker = "🎯" if is_target else "  "
@@ -654,85 +688,38 @@ def test_vision_detection():
             - 'vertical_rectangle': สี่เหลี่ยมผืนผ้าแนวตั้ง
             - 'horizontal_rectangle': สี่เหลี่ยมผืนผ้าแนวนอน
         """
-        detector.set_target('green', 'square')
+        detector.set_target('red', 'vertical_rectangle')
         
         print(f"🎯 Looking for: {detector.target_color} {detector.target_shape}")
         
         # ทดสอบ detection พร้อมแสดงภาพ
         detector.detect_and_shot()
         
-        # หยุดกล้องความละเอียดสูงก่อนเริ่มโหมดประหยัดทรัพยากร
-        print("\n🔄 Switching to low-resource camera mode...")
-        try:
-            detector.ep_camera.stop_video_stream()
-            time.sleep(1)  # รอให้หยุดสมบูรณ์
-        except:
-            print("⚠️ Warning: Could not stop high-res stream")
-            
-        # เริ่มกล้องโหมดประหยัดทรัพยากร
-        try:
-            detector.ep_camera.start_video_stream(display=False, resolution="480p")
-            time.sleep(1)  # รอให้เริ่มงานสมบูรณ์
-            print("✅ Low-resource camera mode started")
-        except:
-            print("⚠️ Warning: Could not start low-res stream")
-        
-        # แสดงภาพจากกล้องแบบประหยัดทรัพยากร
-        print("\n📹 Low-resource camera view (480p, ~10 FPS)")
-        print("📱 Press 'q' or ESC to quit, or wait 30 seconds for auto-exit...")
-        
-        start_time = time.time()
-        frame_count = 0
-        last_frame_time = time.time()
-        
+        # แสดงภาพจากกล้องต่อเนื่องหลังจากยิงเสร็จ
+        print("\n📹 Press 'q' to quit camera view...")
         while True:
             try:
-                current_time = time.time()
-                
-                # Auto-exit หลัง 30 วินาที
-                if current_time - start_time > 30:
-                    print("\n⏰ Auto-exit after 30 seconds")
-                    break
-                
-                # จำกัด frame rate ให้เหลือประมาณ 10 FPS
-                if current_time - last_frame_time < 0.1:  # 100ms = 10 FPS
-                    time.sleep(0.05)
-                    continue
-                    
-                img = detector.ep_camera.read_cv2_image(strategy="newest", timeout=0.5)
+                img = detector.ep_camera.read_cv2_image(strategy="newest", timeout=1)
                 if img is not None:
-                    last_frame_time = current_time
-                    frame_count += 1
-                    
                     # แสดงข้อมูลบนภาพ
                     height, width = img.shape[:2]
-                    fps = frame_count / (current_time - start_time) if current_time > start_time else 0
-                    remaining_time = max(0, 30 - int(current_time - start_time))
+                    cv2.putText(img, "Camera Live View - Press 'q' to quit", 
+                               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(img, f"Resolution: {width}x{height}", 
+                               (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                     
-                    cv2.putText(img, "Low-Resource Mode - Press 'q' or ESC to quit", 
-                               (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    cv2.putText(img, f"Resolution: {width}x{height} | FPS: {fps:.1f}", 
-                               (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                    cv2.putText(img, f"Auto-exit in: {remaining_time}s", 
-                               (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                    
-                    # วาดกรอบกลางเล็กลง
+                    # วาดกรอบกลาง
                     center_x, center_y = width // 2, height // 2
-                    cv2.circle(img, (center_x, center_y), 8, (0, 0, 255), 1)
-                    cv2.line(img, (center_x-20, center_y), (center_x+20, center_y), (0, 0, 255), 1)
-                    cv2.line(img, (center_x, center_y-20), (center_x, center_y+20), (0, 0, 255), 1)
+                    cv2.circle(img, (center_x, center_y), 10, (0, 0, 255), 2)
+                    cv2.line(img, (center_x-30, center_y), (center_x+30, center_y), (0, 0, 255), 2)
+                    cv2.line(img, (center_x, center_y-30), (center_x, center_y+30), (0, 0, 255), 2)
                     
                     cv2.imshow("RoboMaster Live Camera", img)
                 
-                # ปรับปรุงการตรวจจับคีย์ - รอนานขึ้นและรองรับหลายคีย์
-                key = cv2.waitKey(100) & 0xFF  # รอ 100ms
-                if key == ord('q') or key == ord('Q') or key == 27:  # 'q', 'Q', หรือ ESC
-                    print(f"\n✅ Exiting on key press: {chr(key) if key != 27 else 'ESC'}")
+                if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
-                    
-            except Exception as e:
-                print(f"⚠️ Camera error: {e}")
-                time.sleep(0.2)
+            except:
+                time.sleep(0.1)
                 continue
         
     except Exception as e:
