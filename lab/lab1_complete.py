@@ -1093,6 +1093,7 @@ class MazeExplorer:
         while True:
             # Obstacle check BEFORE issuing a new move action
             if self.tof_handler.get_distance() <= 280:
+                
                 print("   PID Move: Obstacle detected by ToF (<=280mm). Aborting forward move.")
                 break
 
@@ -1109,6 +1110,7 @@ class MazeExplorer:
 
             action = self.ep_chassis.move(x=step, y=0, z=0, xy_speed=step_speed)
             action.wait_for_completed()
+            self.ep_chassis.move(x=0, y=0, z=0, xy_speed=step_speed).wait_for_completed
             time.sleep(0.01)
         print("   PID Move: Completed.")
 
@@ -1162,7 +1164,7 @@ class MazeExplorer:
         self.ep_led.set_led(r=0, g=0, b=255)
         for i in range(len(path) - 1):
             if self.current_position in self.visited_for_check:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
             self.visited_for_check.append(self.current_position)
             start_node, end_node = path[i], path[i+1]

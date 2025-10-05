@@ -34,8 +34,8 @@ from test_lap1 import (
 )
 
 # ====== ตั้งชื่อไฟล์ JSON (แก้ให้ตรงกับไฟล์ที่ได้จาก LAB 1) ======
-MAP_JSON_PATH = "map_state_run1_YYYYMMDD_HHMMSS.json"
-TARGETS_JSON_PATH = "targets_run1_YYYYMMDD_HHMMSS.json"
+MAP_JSON_PATH = "map_state_run1_20251005_154418.json"
+TARGETS_JSON_PATH = "targets_run1_20251005_154418.json"
 
 # ====== Utility: สร้างกราฟ/BFS จาก JSON ======
 def _graph_from_json(map_payload):
@@ -96,6 +96,7 @@ class MazeTargetRunner(MazeExplorer):
             self.current_orientation = target_orientation
 
             # เดินหนึ่งช่อง
+            print(self.tof_handler.get_distance())
             self.move_forward_pid(GRID_SIZE_M)
 
             # ✅ ปรับระยะห่างจากกำแพงเล็กน้อย
@@ -256,7 +257,7 @@ class MazeTargetRunner(MazeExplorer):
                            targets_json_path: str,
                            target_filter: dict = None,
                            draw_after=True,
-                           start_mode: str = "fresh"):  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
+                           start_mode: str = "resume"):  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
         """
         map_json_path: path ไปยัง map_state_run1_*.json
         targets_json_path: path ไปยัง targets_run1_*.json
@@ -293,17 +294,30 @@ class MazeTargetRunner(MazeExplorer):
 
         # เลือกเป้าหมายที่ต้องไป
         all_targets = targets_payload.get("targets", [])
+        print(f"[LAB2] โหลด targets ทั้งหมด: {len(all_targets)}")
         if target_filter:
-            color = target_filter.get("color")
-            shape = target_filter.get("shape")
+            def _norm(v):
+                if v is None:
+                    return None
+                if isinstance(v, str) and v.strip().lower() in ("none", "", "*", "any", "all"):
+                    return None
+                return v
+            color = _norm(target_filter.get("color"))
+            shape = _norm(target_filter.get("shape"))
+            print(f"[LAB2] ใช้ตัวกรอง -> color: {color if color is not None else '*'}, shape: {shape if shape is not None else '*'}")
             use_targets = [t for t in all_targets
                            if (color is None or t["color"] == color)
                            and (shape is None or t["shape"] == shape)]
         else:
+            print("[LAB2] ไม่ได้ระบุตัวกรอง ใช้ทุกเป้าหมาย")
             use_targets = list(all_targets)
 
         if not use_targets:
             print("⚠️ ไม่พบเป้าหมายตามเงื่อนไขในไฟล์ targets")
+            if all_targets:
+                print("   เป้าหมายที่มีอยู่:")
+                for i, t in enumerate(all_targets, 1):
+                    print(f"   - {i}. {t.get('color','?')} {t.get('shape','?')} @ grid=({t.get('grid',{}).get('x','?')},{t.get('grid',{}).get('y','?')})")
             return
 
         # ตั้งค่าสี/รูปทรงที่ต้องเล็ง
@@ -326,6 +340,7 @@ class MazeTargetRunner(MazeExplorer):
             goal = remaining.pop(0)
 
             # หาเส้นทาง
+            print(graph, current, goal)
             path = _bfs_path(graph, current, goal)
             if not path:
                 print(f"❌ ไป {goal} ไม่ได้ (no path)")
@@ -342,7 +357,7 @@ class MazeTargetRunner(MazeExplorer):
             current = goal
             self.current_position = goal
             self.pose_handler.set_xy(goal[0] * GRID_SIZE_M, goal[1] * GRID_SIZE_M)
-        self.ep_camera.disable_video_stream()
+        self.ep_camera.stop_video_stream()
 
         print("✅ รอบ 2 เสร็จสิ้น")
         if draw_after:
@@ -373,7 +388,7 @@ if __name__ == "__main__":
     ep.gimbal.sub_angle(freq=20, callback=gim.update)
     # (จะไม่ต้องอ่าน ToF ก็ได้ แต่ถ้าอยาก log ต่อ ก็สมัครไว้)
     ep.sensor.sub_distance(freq=10, callback=tof.update)
-    START_MODE = "fresh"  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
+    START_MODE = "resume"  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
     runner = MazeTargetRunner(ep, tof, gim, pose)
     runner.set_target('yellow', 'horizontal_rectangle')  # ค่า default เผื่อไม่มี filter
 
@@ -386,7 +401,7 @@ if __name__ == "__main__":
         runner.run_targets_shortest(
             map_json_path=MAP_JSON_PATH,
             targets_json_path=TARGETS_JSON_PATH,
-            target_filter={"color": "None", "shape": "None"},  # หรือ None
+            target_filter=None,  # หรือกำหนดเฉพาะเจาะจง เช่น {"color": "green", "shape": "square"}
             draw_after=True,
             start_mode=START_MODE
         )

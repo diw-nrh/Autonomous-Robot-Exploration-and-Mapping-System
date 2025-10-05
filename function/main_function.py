@@ -7,6 +7,7 @@ Main Function Library for RoboMaster Vision Detection
 
 import cv2
 import time
+import math
 import numpy as np
 import queue
 from robomaster import robot
@@ -20,6 +21,7 @@ class PID:
         self.out_clip = out_clip
         self.integ = 0.0
         self.last_error = 0.0
+        self.shoot_target = []
         
     def step(self, error, dt):
         if dt <= 0:
@@ -63,6 +65,16 @@ class VisionDetector:
         self.ep_blaster = ep_robot.blaster
         self.tof_handler = SimpleTofHandler(ep_robot.sensor)
         self.last_time = time.monotonic()
+        self.shoot_target = []  # เก็บรายการสิ่งที่พบทั้งหมดในรอบการตรวจจับ
+        self._shot_centroids = []  # เก็บตำแหน่งที่ยิงแล้ว เพื่อตัดซ้ำ
+        # สีสำหรับวาดกรอบในภาพ (BGR)
+        self.draw_colors = {
+            'red': (0, 0, 255),
+            'green': (0, 255, 0),
+            'yellow': (0, 255, 255),
+            'blue': (255, 0, 0),
+            'unknown': (255, 255, 255)
+        }
         
         # Color ranges (HSV)
         self.color_ranges = {
@@ -89,173 +101,316 @@ class VisionDetector:
         self.target_color = color
         self.target_shape = shape
 
-    def detect_and_shot(self):
-        aim_grid = (self.current_position, self.current_orientation, self.target_color, self.target_shape)
-        if aim_grid not in self.shoot_grid:
-            pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
-            pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
-            self.ep_gimbal.recenter().wait_for_completed()
-            tof_dist = self.tof_handler.get_distance()
+    # ------------------------- Helpers -------------------------
+    def _base_color(self, color_key: str) -> str:
+        """แปลง color_key (เช่น 'brown_red') ไปเป็นสีพื้นฐาน ('red')"""
+        for base, key in self.colors.items():
+            if key == color_key:
+                return base
+        return color_key
+
+    def _shape_from_contour(self, cnt) -> str:
+        area = cv2.contourArea(cnt)
+        if area < 1:
+            return "unknown"
+        peri = cv2.arcLength(cnt, True)
+        if peri == 0:
+            return "unknown"
+        # Circle by circularity
+        circularity = 4 * math.pi * (area / (peri * peri))
+        if circularity > 0.75:
+            return "circle"
+        approx = cv2.approxPolyDP(cnt, 0.03 * peri, True)
+        if len(approx) == 4:
+            x, y, w, h = cv2.boundingRect(approx)
+            if h == 0:
+                return "unknown"
+            ratio = w / float(h)
+            if 0.9 <= ratio <= 1.1:
+                return "square"
+            return "rectangle_h" if ratio > 1.1 else "rectangle_v"
+        return "unknown"
+
+    def _detect_all_in_frame(self, img):
+        """คืนค่ารายการ detections ทั้งหมดใน frame: list[dict]"""
+        detections = []
+        h, w = img.shape[:2]
+        roi_w, roi_h = min(800, w), min(450, h)
+        roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
+        roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        kernel = np.ones((3, 3), np.uint8)
+
+        for color_key, (lower, upper) in self.color_ranges.items():
+            lower = np.array(lower, dtype=np.uint8)
+            upper = np.array(upper, dtype=np.uint8)
+            mask = cv2.inRange(hsv, lower, upper)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                if cv2.contourArea(cnt) < 500:
+                    continue
+                x, y, bw, bh = cv2.boundingRect(cnt)
+                cx = roi_x + x + bw // 2
+                cy = roi_y + y + bh // 2
+                shape = self._shape_from_contour(cnt)
+                detections.append({
+                    "color_key": color_key,
+                    "base_color": self._base_color(color_key),
+                    "shape": shape,
+                    "bbox": (roi_x + x, roi_y + y, bw, bh),
+                    "center": (cx, cy),
+                })
+        return detections
+
+    def _cluster_initial(self, dets, dist_thresh=40):
+        """รวม detections ที่ซ้ำกันในหลายเฟรมโดยอิงตามสี/รูปร่าง/ตำแหน่งใกล้กัน"""
+        clustered = []
+        for d in dets:
+            placed = False
+            for c in clustered:
+                # เช็คทั้งสีและตำแหน่งใกล้กัน (ไม่สนรูปร่างเพราะอาจเปลี่ยนระหว่างเฟรม)
+                if d["color_key"] == c["color_key"]:
+                    (cx, cy) = d["center"]
+                    (ccx, ccy) = c["center"]
+                    if math.hypot(cx - ccx, cy - ccy) < dist_thresh:
+                        # merge โดยใช้รูปร่างที่ไม่ใช่ unknown ถ้ามี
+                        if c["shape"] == "unknown" and d["shape"] != "unknown":
+                            c["shape"] = d["shape"]
+                        # เฉลี่ยตำแหน่ง
+                        c["center"] = ((ccx + cx)//2, (ccy + cy)//2)
+                        placed = True
+                        break
+            if not placed:
+                clustered.append(d.copy())
+        return clustered
+
+    def _already_shot(self, center, tol=50):
+        for (sx, sy) in self._shot_centroids:
+            if math.hypot(center[0]-sx, center[1]-sy) <= tol:
+                return True
+        return False
+
+    def detect_and_shot(self, sample_time=1.0, aim_timeout=6.0):
+        """
+        - ตรวจจับทุกรูปร่างทุกสี (แบบ aumm.py) แล้วเก็บใน self.shoot_target
+        - ยิงเฉพาะวัตถุที่ตรงกับ target_color/target_shape ทีละตัว (ซ้ายไปขวา)
+        - ถ้ายิงแล้วจะไม่ยิงซ้ำ
+        - พิมพ์สรุป self.shoot_target หลังยิงครบ
+        """
+        # เตรียม
+        self.shoot_target = []
+        self._shot_centroids = []
+        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+        time.sleep(0.2)
+        try:
             self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
-            center_x = center_y = None
-            err_x = err_y = 0.0
-            yaw_cmd = pitch_cmd = 0.0
-            # ensure camera stream is running
-            have_object = False  # เพิ่มการประกาศตัวแปร
-            time.sleep(0.5)
-            timebefore = time.monotonic()
-        
-            while True:
+        except Exception:
+            pass
+
+        # 1) เก็บตัวอย่างหลายเฟรม เพื่อรวมเป็นชุดเป้าเริ่มต้น
+        print("🔍 Scanning for objects...")
+        t0 = time.time()
+        pooled = []
+        frame_count = 0
+        while time.time() - t0 < sample_time:
+            try:
+                img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
+                if img is None:
+                    print("⚠️ No image received from camera")
+                    continue
+                frame_count += 1
+                print(f"📸 Processing frame {frame_count}")
+            except queue.Empty:
+                print("⚠️ Camera queue empty")
+                continue
+            dets = self._detect_all_in_frame(img)
+            print(f"   Found {len(dets)} detections in frame {frame_count}")
+            for i, d in enumerate(dets):
+                print(f"     {i+1}. {d['base_color']} {d['shape']} at {d['center']}")
+            pooled.extend(dets)
+            # Visualization: draw all detections + combined binary mask of ROI
+            h, w = img.shape[:2]
+            roi_w, roi_h = min(800, w), min(450, h)
+            roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
+            roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            combined_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+            for color_key, (lower, upper) in self.color_ranges.items():
+                lower_np = np.array(lower, dtype=np.uint8)
+                upper_np = np.array(upper, dtype=np.uint8)
+                mask = cv2.inRange(hsv, lower_np, upper_np)
+                combined_mask = cv2.bitwise_or(combined_mask, mask)
+            frame = img.copy()
+            # Draw ROI rectangle
+            cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 255), 2)
+            # Draw detections
+            for d in dets:
+                (x, y, bw, bh) = d["bbox"]
+                color_bgr = self.draw_colors.get(d["base_color"], (255, 255, 255))
+                label = f"{d['base_color']}_{d['shape']}"
+                cv2.rectangle(frame, (x, y), (x + bw, y + bh), color_bgr, 2)
+                cx, cy = d["center"]
+                cv2.circle(frame, (cx, cy), 3, color_bgr, -1)
+                cv2.putText(frame, label, (x, max(0, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_bgr, 2, cv2.LINE_AA)
+            cv2.imshow("Detections", frame)
+            cv2.imshow("Binary - Combined (ROI)", combined_mask)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        initial = self._cluster_initial(pooled)
+        print(f"📊 Total frames processed: {frame_count}")
+        print(f"📊 Total detections: {len(pooled)}")
+        print(f"📊 Clustered objects: {len(initial)}")
+
+        # เก็บทั้งหมดลง shoot_target (ยังไม่ยิง)
+        for d in initial:
+            entry = {
+                "color": d["base_color"],
+                "color_key": d["color_key"],
+                "shape": d["shape"],
+                "center": d["center"],
+                "bbox": d["bbox"],
+                "shot": False,
+            }
+            self.shoot_target.append(entry)
+            print(f"🎯 Added to shoot_target: {entry['color']} {entry['shape']} at {entry['center']}")
+
+        # 2) เลือกเฉพาะที่ตรงกับ target
+        # map shape synonyms
+        target_shape = self.target_shape
+        if target_shape == "horizontal_rectangle":
+            target_shape = "rectangle_h"
+        elif target_shape == "vertical_rectangle":
+            target_shape = "rectangle_v"
+
+        targets_to_shoot = [d for d in self.shoot_target
+                            if d["color"] == self.target_color and d["shape"] == target_shape]
+        print(f"🎯 Targets matching {self.target_color} {target_shape}: {len(targets_to_shoot)}")
+        # ยิงจากซ้ายไปขวา
+        targets_to_shoot.sort(key=lambda d: d["center"][0])
+
+        # 3) ยิงทีละตัว
+        if not targets_to_shoot:
+            print("⚠️ No targets found matching criteria")
+        else:
+            print(f"🎯 Shooting {len(targets_to_shoot)} targets...")
+            
+        pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=12.0)
+        pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
+        camera_w = 640  # will be corrected by first frame
+        camera_h = 360
+
+        for idx, tgt in enumerate(targets_to_shoot):
+            if self._already_shot(tgt["center"]):
+                print(f"🎯 Target {idx+1} already shot, skipping...")
+                continue
+            print(f"🎯 Aiming at target {idx+1}: {tgt['color']} {tgt['shape']} at {tgt['center']}")
+            t_end = time.time() + aim_timeout
+            last_seen = tgt["center"]
+            aimed_successfully = False
+            
+            while time.time() < t_end:
                 try:
                     img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
                     if img is None:
                         continue
                 except queue.Empty:
                     continue
-                # แปลงชื่อสีเก่าเป็นใหม่ (ถ้าจำเป็น)
-                color_key = self.target_color
-                if self.target_color in self.colors:
-                    color_key = self.colors[self.target_color]
-                
-                # ตรวจสอบว่ามีสีที่ต้องการหรือไม่
-                if color_key not in self.color_ranges:
-                    print(f"⚠️ ไม่พบสี '{self.target_color}' ในระบบ")
-                    return []
-                # ROI (กลางภาพ)
                 h, w = img.shape[:2]
+                camera_w, camera_h = w//2, h//2
+                dets = self._detect_all_in_frame(img)
+                # Visualization during aiming
                 roi_w, roi_h = min(800, w), min(450, h)
                 roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
                 roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
-                
-                # แปลง HSV และสร้าง mask (เพิ่มการเบลอ + morphology เพื่อลด noise)
-                blur = cv2.GaussianBlur(roi, (5, 5), 0)
-                hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-                color_data = self.color_ranges[color_key]
-                
-                # สร้าง mask จากช่วงสี
-                lower_bound = np.array(color_data[0])
-                upper_bound = np.array(color_data[1])
-                mask = cv2.inRange(hsv, lower_bound, upper_bound)
-                kernel = np.ones((5, 5), np.uint8)
-                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-                # หา contours
-                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                for cnt in contours:
-                    
-                    if cv2.contourArea(cnt) < 200:
-                        continue
-                    
-                    # ตรวจจับรูปทรง
-                    perimeter = cv2.arcLength(cnt, True)
-                    approx = cv2.approxPolyDP(cnt, 0.02 * perimeter, True)
-                    vertices = len(approx)
-                    
-                    shape = None
-                    if vertices >= 8:
-                        area = cv2.contourArea(cnt)
-                        circularity = 4 * np.pi * area / (perimeter * perimeter)
-                        if circularity > 0.7:
-                            shape = 'circle'
-                    elif vertices == 3:
-                        shape = 'triangle'
-                    elif vertices == 4:
-                        # ใช้ bounding box เพื่อแยกประเภทสี่เหลี่ยม
-                        x, y, w_box, h_box = cv2.boundingRect(cnt)
-                        aspect_ratio = float(w_box) / h_box
-                        
-                        if 0.9 <= aspect_ratio <= 1.1:
-                            shape = 'square'  # สี่เหลี่ยมจัตุรัส
-                        elif aspect_ratio > 1.3:
-                            shape = 'horizontal_rectangle'  # สี่เหลี่ยมผืนผ้าแนวนอน (กว้างมากกว่าสูง)
-                        elif aspect_ratio < 0.7:
-                            shape = 'vertical_rectangle'  # สี่เหลี่ยมผืนผ้าแนวตั้ง (สูงมากกว่ากว้าง)
-                        else:
-                            shape = 'rectangle'  # สี่เหลี่ยมทั่วไป
-                    
-                    if shape == self.target_shape:
-                        x, y, w_box, h_box = cv2.boundingRect(cnt)
-                        center_x = roi_x + x + w_box // 2
-                        center_y = roi_y + y + h_box // 2
-                        break  # เจอแล้วออกจาก loop
-
-                # วาดกรอบและข้อความ (ถ้าเจอวัตถุ)
-                if center_x is not None and center_y is not None:
-                    cv2.rectangle(img, (center_x-15, center_y-15), (center_x+30, center_y+30), (0, 255, 0), 2)
-                    cv2.putText(img, f"{self.target_shape}", (center_x-40, center_y-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-            
-                # แสดงข้อมูล
-                cv2.putText(img, f"Detecting: {self.target_color} {self.target_shape}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(img, f"Found: {1 if center_x is not None and center_y is not None else 0} objects", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(img, "Press 'q' to quit", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                
-                cv2.imshow("RoboMaster Detection", img)
-                # แสดงหน้าต่าง mask เพื่อ debug สี (ช่วยหาช่วง HSV)
-                try:
-                    cv2.imshow("Mask", mask)
-                except Exception:
-                    pass
+                hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                combined_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+                for color_key, (lower, upper) in self.color_ranges.items():
+                    lower_np = np.array(lower, dtype=np.uint8)
+                    upper_np = np.array(upper, dtype=np.uint8)
+                    mask = cv2.inRange(hsv, lower_np, upper_np)
+                    combined_mask = cv2.bitwise_or(combined_mask, mask)
+                frame = img.copy()
+                cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 255), 2)
+                for d_vis in dets:
+                    (x, y, bw, bh) = d_vis["bbox"]
+                    color_bgr = self.draw_colors.get(d_vis["base_color"], (255, 255, 255))
+                    label = f"{d_vis['base_color']}_{d_vis['shape']}"
+                    cv2.rectangle(frame, (x, y), (x + bw, y + bh), color_bgr, 2)
+                    cx_vis, cy_vis = d_vis["center"]
+                    cv2.circle(frame, (cx_vis, cy_vis), 3, color_bgr, -1)
+                    cv2.putText(frame, label, (x, max(0, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_bgr, 2, cv2.LINE_AA)
+                # Draw center crosshair
+                cv2.line(frame, (camera_w-20, camera_h), (camera_w+20, camera_h), (0, 0, 255), 2)
+                cv2.line(frame, (camera_w, camera_h-20), (camera_w, camera_h+20), (0, 0, 255), 2)
+                cv2.imshow("Detections", frame)
+                cv2.imshow("Binary - Combined (ROI)", combined_mask)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
-                    print("🔴 User pressed 'q' - exiting detection")
                     break
-                
-                now = time.monotonic()
-                dt = now - self.last_time
-                self.last_time = now
-                camera_w = 1280//2
-                camera_h = 720//2
-                if center_x is not None and center_y is not None and tof_dist < 1000 and tof_dist>300:
-                    have_object = True
-                    err_x = (center_x - camera_w)
-                    err_y = (center_y - camera_h)
+                # หา detection ใกล้พิกัดล่าสุดของเป้านี้ที่สุด
+                same = [d for d in dets if d["base_color"] == tgt["color"] and d["shape"] == tgt["shape"]]
+                if same:
+                    # nearest
+                    d = min(same, key=lambda dd: math.hypot(dd["center"][0]-last_seen[0], dd["center"][1]-last_seen[1]))
+                    last_seen = d["center"]
+                    cx, cy = last_seen
+                    err_x = cx - camera_w
+                    err_y = cy - camera_h
+                    now = time.monotonic()
+                    dt = now - self.last_time
+                    self.last_time = now
                     yaw_cmd = pid_yaw.step(err_x, dt)
                     pitch_cmd = pid_pitch.step(err_y, dt)
-                    if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05 :
-                        try:
-                            self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
-                        except Exception:
-                            try:
-                                self.ep_gimbal.drive_speed(pitch_speed=pitch_cmd, yaw_speed=yaw_cmd)
-                            except Exception:
-                                pass
-                    else:
-                        # เป้าอยู่ตรงกลางแล้ว - ยิงและออก
-                        print("🎯 Target centered - firing and exiting")
+                    try:
+                        self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
+                    except Exception:
+                        pass
+                    # ถึงกลางภาพแล้ว -> ยิง
+                    if abs(err_x) < 12 and abs(err_y) < 10:
+                        print(f"🎯 Target centered! Firing at {last_seen}")
                         self.ep_blaster.fire(times=3)
-                        time.sleep(1)
+                        time.sleep(0.6)
                         self.ep_blaster.fire(times=3)
-                        time.sleep(1)
-                        self.ep_blaster.fire(times=3)
-                        time.sleep(1)
-                        self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
-                        self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
-                        cv2.destroyAllWindows()
-                        self.shoot_grid.append((self.current_position, self.current_orientation, self.target_color, self.target_shape,))
+                        time.sleep(0.6)
+                        # บันทึกสถานะยิง
+                        self._shot_centroids.append(last_seen)
+                        tgt["shot"] = True
+                        aimed_successfully = True
+                        print(f"✅ Target {idx+1} shot successfully!")
                         break
+                else:
+                    # ไม่เห็นชั่วคราว -> ชะลอเล็กน้อย
+                    time.sleep(0.05)
+            
+            if not aimed_successfully:
+                print(f"⚠️ Failed to aim at target {idx+1} within timeout")
+                
+            # หยุดกิมบอลเล็กน้อยก่อนเป้าถัดไป
+            try:
+                self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+            except Exception:
+                pass
+            time.sleep(0.3)
 
-                elif center_x is not None and center_y is not None and time.monotonic() - timebefore < 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
-                    self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
-                    pid_yaw.integ *= 0.9
-                    pid_pitch.integ *= 0.9
-                elif center_x is None and center_y is None and time.monotonic() - timebefore > 5.0 and not have_object and tof_dist < 1000 and tof_dist>300:
-                    self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
-                    cv2.destroyAllWindows()
-                    break
-                elif time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist>300:
-                    self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
-                    cv2.destroyAllWindows()
-                    break
-                elif tof_dist > 1000 or tof_dist<300:
-                    self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
-                    cv2.destroyAllWindows()
-                    break
-                # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
-                center_x = center_y = None
-        else:
-            print("🎯 Target already engaged in this grid.")
-            return None  
-
+        # 4) แสดงสรุป
+        shot_count = sum(1 for s in self.shoot_target if s["shot"])
+        total_targets = len([s for s in self.shoot_target if s["color"] == self.target_color and 
+                            (s["shape"] == target_shape or 
+                             (target_shape == "rectangle_h" and s["shape"] == "horizontal_rectangle") or
+                             (target_shape == "rectangle_v" and s["shape"] == "vertical_rectangle"))])
+        
+        print(f"\n🎯 Mission Summary: Shot {shot_count}/{total_targets} {self.target_color} {self.target_shape} targets")
+        print("\n[Summary] shoot_target:")
+        for i, s in enumerate(self.shoot_target, 1):
+            status = "✅ SHOT" if s["shot"] else "❌ MISSED"
+            print(f"  {i}. color={s['color']} ({s['color_key']}), shape={s['shape']}, center={s['center']}, {status}")
+        try:
+            cv2.destroyWindow("Binary - Combined (ROI)")
+            cv2.destroyWindow("Detections")
+        except Exception:
+            pass
+        return self.shoot_target
 # Test function
 def test_camera_only():
     """ทดสอบกล้องเพียงอย่างเดียว"""
@@ -337,6 +492,13 @@ def test_vision_detection():
     try:
         # สร้าง detector
         detector = VisionDetector(ep_robot)
+        
+        # เริ่ม camera stream
+        print("📷 Starting camera stream...")
+        detector.ep_camera.start_video_stream(display=False, resolution="720p")
+        time.sleep(2)
+        print("✅ Camera stream started")
+        
         # ตั้งค่าเป้าหมาย (ตัวอย่าง: หาวงกลมสีน้ำเงิน)
         """
         รันการตรวจจับวัตถุด้วยกล้อง RoboMaster แบบสั้นๆ
@@ -348,7 +510,7 @@ def test_vision_detection():
             - 'vertical_rectangle': สี่เหลี่ยมผืนผ้าแนวตั้ง
             - 'horizontal_rectangle': สี่เหลี่ยมผืนผ้าแนวนอน
         """
-        detector.set_target('red', 'horizontal_rectangle')
+        detector.set_target('green', 'square')
         
         print(f"🎯 Looking for: {detector.target_color} {detector.target_shape}")
         
@@ -358,6 +520,11 @@ def test_vision_detection():
     except Exception as e:
         print(f"❌ Vision test failed: {e}")
     finally:
+        try:
+            detector.ep_camera.stop_video_stream()
+        except:
+            pass
+        cv2.destroyAllWindows()
         ep_robot.close()
 
 if __name__ == "__main__":
