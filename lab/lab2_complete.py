@@ -27,7 +27,7 @@ from collections import deque
 from datetime import datetime
 
 # ==== ดึงของเดิมจาก LAB 1 ====
-from test_lap1 import (
+from lab1_complete import (
     robot,                      # robomaster.robot
     MazeExplorer,               # คลาสหลักจาก LAB1
     GRID_SIZE_M,                # ขนาดกริด
@@ -35,8 +35,8 @@ from test_lap1 import (
 )
 
 # ====== ตั้งชื่อไฟล์ JSON (แก้ให้ตรงกับไฟล์ที่ได้จาก LAB 1) ======
-MAP_JSON_PATH = "map_state_run1_20251005_154418.json"
-TARGETS_JSON_PATH = "targets_run1_20251005_154418.json"
+MAP_JSON_PATH = "map_state_run1_20251005_164405.json"
+TARGETS_JSON_PATH = "targets_run1_20251005_164405.json"
 
 # ====== Utility: สร้างกราฟ/BFS จาก JSON ======
 def _graph_from_json(map_payload):
@@ -95,14 +95,14 @@ class MazeTargetRunner(MazeExplorer):
             # หมุนไปทิศที่ถูก
             self.turn_pid(target_angle)
             self.current_orientation = target_orientation
-
+            time.sleep(0.5)
             # เดินหนึ่งช่อง
             print(self.tof_handler.get_distance())
             self.move_forward_pid(GRID_SIZE_M)
-
+            time.sleep(0.5)
             # ✅ ปรับระยะห่างจากกำแพงเล็กน้อย
             try:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.25)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.2)
             except Exception as e:
                 print(f"[Adjust skipped] {e}")
 
@@ -451,7 +451,7 @@ if __name__ == "__main__":
     print("Robot connected.")
 
     # สร้าง handler แบบ LAB 1 (ดึงจาก lab1)
-    from test_lap1 import TofDataHandler, GimbalDataHandler, PoseDataHandler, PID
+    from lab1_complete import TofDataHandler, GimbalDataHandler, PoseDataHandler, PID
 
     tof = TofDataHandler()
     gim = GimbalDataHandler()

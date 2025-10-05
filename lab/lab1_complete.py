@@ -780,7 +780,7 @@ class MazeExplorer:
         self.internal_map.mark_explored(self.current_position)
         
         wall_distances = {}
-        self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
+        self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
         direction_to_skip = -1
         if previous_position:
             print(f"   -> Path from {previous_position} is known. Adding connection automatically.")
@@ -1065,11 +1065,11 @@ class MazeExplorer:
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=1).wait_for_completed()
         if wall_left:
-            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m
+            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m - 0.1
             if abs(move_dist_m) > 0.05:
-                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=1).wait_for_completed()
+                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=1).wait_for_completed()
         elif wall_right:
-            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m
+            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m - 0.1
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=1).wait_for_completed()
 
@@ -1150,6 +1150,7 @@ class MazeExplorer:
             action.wait_for_completed()
             time.sleep(0.01)
         self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        time.sleep(0.5)
         print("   PID Turn: Completed.")
 
     def execute_path(self, path):
@@ -1164,7 +1165,7 @@ class MazeExplorer:
         self.ep_led.set_led(r=0, g=0, b=255)
         for i in range(len(path) - 1):
             if self.current_position in self.visited_for_check:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.25)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
             self.visited_for_check.append(self.current_position)
             start_node, end_node = path[i], path[i+1]
@@ -1226,7 +1227,7 @@ class MazeExplorer:
 
             self.set_target('green', 'square')
             while True:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.20)
                 
                 if self.current_position not in self.internal_map.explored:
                     previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
