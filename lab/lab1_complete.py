@@ -327,7 +327,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         
         # Exploration settings
-        self.border = (4, 4)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (3, 3)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
         # Exploration settings
@@ -1121,7 +1121,7 @@ class MazeExplorer:
             "grid_x": gx, "grid_y": gy, "yaw": yaw
         })
 
-    def turn_pid(self, target_angle, speed_limit=180):
+    def turn_pid(self, target_angle, speed_limit=90):
         """
         ใช้ PID controller เพื่อหมุนไปยังมุมที่กำหนด
         
@@ -1164,7 +1164,7 @@ class MazeExplorer:
         self.ep_led.set_led(r=0, g=0, b=255)
         for i in range(len(path) - 1):
             if self.current_position in self.visited_for_check:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.25)
                 print(f"\nPosition {self.current_position} already explored. Skipping scan.")
             self.visited_for_check.append(self.current_position)
             start_node, end_node = path[i], path[i+1]
@@ -1206,64 +1206,67 @@ class MazeExplorer:
         2. แสดงแผนที่แบบ real-time
         3. บันทึกข้อมูลเซ็นเซอร์และเส้นทาง
         """
-        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
-        
-        # เริ่มต้น real-time plotting
-        self.init_real_time_plot()
-        self.update_real_time_plot()  # แสดงแผนที่เริ่มต้น
-        """
-        รันการตรวจจับวัตถุด้วยกล้อง RoboMaster แบบสั้นๆ
-        
-        target_color: สีเป้าหมาย ('red', 'green', 'blue', 'yellow')
-        target_shape: รูปทรงเป้าหมาย
-            - 'circle': วงกลม
-            - 'square': สี่เหลี่ยมจัตุรัส  
-            - 'vertical_rectangle': สี่เหลี่ยมผืนผ้าแนวตั้ง
-            - 'horizontal_rectangle': สี่เหลี่ยมผืนผ้าแนวนอน
-        """
-        self.ep_camera.start_video_stream(display=False, resolution="720p")
-
-        self.set_target('green', 'square')
-        while True:
-            self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
+        try:
+            self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
             
-            if self.current_position not in self.internal_map.explored:
-                previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
-                self.scan_surroundings_with_gimbal(previous_position=previous_pos)
-                # อัปเดตแผนที่หลังสแกน
-                self.update_real_time_plot()
+            # เริ่มต้น real-time plotting
+            self.init_real_time_plot()
+            self.update_real_time_plot()  # แสดงแผนที่เริ่มต้น
+            """
+            รันการตรวจจับวัตถุด้วยกล้อง RoboMaster แบบสั้นๆ
+            
+            target_color: สีเป้าหมาย ('red', 'green', 'blue', 'yellow')
+            target_shape: รูปทรงเป้าหมาย
+                - 'circle': วงกลม
+                - 'square': สี่เหลี่ยมจัตุรัส  
+                - 'vertical_rectangle': สี่เหลี่ยมผืนผ้าแนวตั้ง
+                - 'horizontal_rectangle': สี่เหลี่ยมผืนผ้าแนวนอน
+            """
+            self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-            path_to_execute = self.decide_next_path()
-            if not path_to_execute:
-                print(f"\n--- EXPLORATION COMPLETE! All areas explored ---")
+            self.set_target('green', 'square')
+            while True:
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.18)
                 
-                self.ep_led.set_led(r=0, g=255, b=0, effect="on")
-                time.sleep(0.5)
-                self.ep_camera.stop_video_stream()
-                time.sleep(0.5)
-                A=self.shoot_grid
-                print(A)
-                break
-            self.execute_path(path_to_execute)
-            # อัปเดตแผนที่หลังเคลื่อนที่
-            self.update_real_time_plot()
+                if self.current_position not in self.internal_map.explored:
+                    previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
+                    self.scan_surroundings_with_gimbal(previous_position=previous_pos)
+                    # อัปเดตแผนที่หลังสแกน
+                    self.update_real_time_plot()
 
-        self.save_targets_json()
-        self.save_map_state_json()
+                path_to_execute = self.decide_next_path()
+                if not path_to_execute:
+                    print(f"\n--- EXPLORATION COMPLETE! All areas explored ---")
+                    
+                    self.ep_led.set_led(r=0, g=255, b=0, effect="on")
+                    time.sleep(0.5)
+                    self.ep_camera.stop_video_stream()
+                    time.sleep(0.5)
+                    A=self.shoot_grid
+                    print(A)
+                    break
+                self.execute_path(path_to_execute)
+                # อัปเดตแผนที่หลังเคลื่อนที่
+                self.update_real_time_plot()
+        except:
+            print("error to complete")
+        finally:
+            self.save_targets_json()
+            self.save_map_state_json()
 
-        print("\n--- Final Marker Map ---")
+            print("\n--- Final Marker Map ---")
 
-        # ปิด real-time plot และบันทึกแผนที่สุดท้าย
-        self.close_real_time_plot()
-        
-        plot_map_with_walls(
-            self.internal_map.graph,
-            self.internal_map.blocked,
-            self.visited_path,
-            filename="maze_map.png"
-        )
+            # ปิด real-time plot และบันทึกแผนที่สุดท้าย
+            self.close_real_time_plot()
+            
+            plot_map_with_walls(
+                self.internal_map.graph,
+                self.internal_map.blocked,
+                self.visited_path,
+                filename="maze_map.png"
+            )
 
-        self.save_csv_logs()
+            self.save_csv_logs()
 
 # ==============================================================================
 # Map Visualization Functions
@@ -1360,6 +1363,8 @@ if __name__ == '__main__':
     time.sleep(2)
     try:
         explorer.run_mission()
+    except:
+        print("error to end")
     finally:
         try:
             explorer.save_targets_json()
