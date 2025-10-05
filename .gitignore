@@ -1,29 +1,18 @@
-# Virtual Environment
-<<<<<<< HEAD
-venv/
-env/
-ENV/
-.venv/
+# Virtual Environments
 .env/
-
-# Python Cache
-=======
-mvenv/
+.venv/
 venv/
 env/
 ENV/
+mvenv/
 
-# Python
->>>>>>> 488d6f5c7ec601bfc0c4294b78656ab9d4f9ca97
+# Python cache/artifacts
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-<<<<<<< HEAD
 
-# Distribution / packaging
-=======
->>>>>>> 488d6f5c7ec601bfc0c4294b78656ab9d4f9ca97
+# Packaging
 .Python
 build/
 develop-eggs/
@@ -37,74 +26,55 @@ parts/
 sdist/
 var/
 wheels/
-<<<<<<< HEAD
-pip-wheel-metadata/
-share/python-wheels/
-=======
->>>>>>> 488d6f5c7ec601bfc0c4294b78656ab9d4f9ca97
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
+pip-wheel-metadata/
+share/python-wheels/
 
 # PyInstaller
 *.manifest
 *.spec
 
-# Installer logs
+# Logs
+*.log
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Unit test / coverage reports
+# Test/coverage
 htmlcov/
 .tox/
-<<<<<<< HEAD
 .nox/
-=======
->>>>>>> 488d6f5c7ec601bfc0c4294b78656ab9d4f9ca97
 .coverage
 .coverage.*
 .cache
 nosetests.xml
 coverage.xml
 *.cover
-<<<<<<< HEAD
 *.py,cover
-=======
->>>>>>> 488d6f5c7ec601bfc0c4294b78656ab9d4f9ca97
 .hypothesis/
 .pytest_cache/
 
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
+# Databases
 local_settings.py
 db.sqlite3
-<<<<<<< HEAD
 db.sqlite3-journal
-=======
->>>>>>> 488d6f5c7ec601bfc0c4294b78656ab9d4f9ca97
 
-# Flask stuff:
+# Framework caches
 instance/
-.webassets-cache
+.webassets-cache/
+.scrapy/
 
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
+# Docs
 docs/_build/
 
 # PyBuilder
 target/
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# Jupyter
+.ipynb_checkpoints/
 
-<<<<<<< HEAD
 # IPython
 profile_default/
 ipython_config.py
@@ -118,49 +88,39 @@ Pipfile.lock
 # PEP 582
 __pypackages__/
 
-# Celery stuff
+# Celery
 celerybeat-schedule
 celerybeat.pid
-=======
-# pyenv
-.python-version
-
-# celery beat schedule file
-celerybeat-schedule
->>>>>>> 488d6f5c7ec601bfc0c4294b78656ab9d4f9ca97
 
 # SageMath parsed files
 *.sage.py
 
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
+# Environments (alt)
 env.bak/
 venv.bak/
 
-# Spyder project settings
-.spyderproject
-.spyproject
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-# Rope project settings
-.ropeproject
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
-# mkdocs documentation
-/site
+# Temporary files
+*.tmp
+*.temp
+*.bak
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-<<<<<<< HEAD
-# Pyre type checker
-.pyre/
-
-# RoboMaster specific files
+# Project-specific data
 robot_log.txt
 robot_map.csv
 *.mp4
@@ -169,34 +129,5 @@ captured_images/
 sensor_data/
 map_data/
 
-# IDE files
-=======
-# IDE
->>>>>>> 488d6f5c7ec601bfc0c4294b78656ab9d4f9ca97
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-<<<<<<< HEAD
-# OS specific files
-=======
-# OS
->>>>>>> 488d6f5c7ec601bfc0c4294b78656ab9d4f9ca97
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-<<<<<<< HEAD
-Thumbs.db
-
-# Temporary files
-*.tmp
-*.temp
-*.bak
-=======
-Thumbs.db
->>>>>>> 488d6f5c7ec601bfc0c4294b78656ab9d4f9ca97
+# Data logs
+*.csv

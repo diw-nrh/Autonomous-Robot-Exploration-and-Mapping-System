@@ -1,44 +1,98 @@
-# -*- coding: utf-8 -*-
+SHOW_DEBUG = False
 """
-RoboMaster EP — Distance-first + PID Tracking (Yaw/Pitch) + Overlay
-- โฟกัสวัดระยะจากขนาดกรอบ (tight bbox) แล้วใช้ PID หันตามเป้า
-- สีหลัก: โทนเหลือง (HSV h≈25-40, s>160, v>100)
+=================================================================================
+LAB 1: MAZE EXPLORATION ROBOT
+=================================================================================
+Description: หุ่นยนต์สำรวจเขาวงกต โดยใช้ ToF sensor ด้านหน้า และ IR sensors ด้านข้าง
+            เฉพาะการสำรวจทั้งหมด ไม่มี goal
+
+Features:
+- ToF sensor สำหรับวัดระยะด้านหน้า
+- IR digital sensors สำหรับตรวจจับกำแพงด้านซ้าย/ขวา
+- Real-time mapping แสดงแผนที่ขณะสำรวจ
+- Complete maze exploration only
+- CSV logging และ state saving/loading
+
+Hardware Requirements:
+- RoboMaster EP/S1
+- ToF sensor (built-in)
+- IR digital sensors x2 (port 1: ซ้าย, port 2: ขวา)
+
+Author: [Your Name]
+Date: October 2025
+=================================================================================
 """
 
-import os, sys, time, math, csv, traceback
+# =============================================================================
+# IMPORTS AND DEPENDENCIES
+# =============================================================================
+from robomaster import blaster
+import time
+import threading
+import math
+import csv
+from datetime import datetime
+from collections import deque
+import json
+import os
+import sys
+import statistics
 import cv2
-import numpy as np
 import robomaster
-from robomaster import robot
+from robomaster import robot, vision
+import queue
+# Matplotlib for real-time plotting and map visualization
+import matplotlib.pyplot as plt
+import numpy as np
 
-# ========= กล้อง/กิมบอล =========
-CAMERA_W = 1280
-CAMERA_H = 720
-CAMERA_HFOV_DEG = 120.0
-ASPECT = CAMERA_W / CAMERA_H
-CAMERA_VFOV_DEG = math.degrees(2.0 * math.atan(math.tan(math.radians(CAMERA_HFOV_DEG/2.0)) / ASPECT))
+# =============================================================================
+# CONFIGURATION AND CONSTANTS
+# =============================================================================
 
-GIMBAL_TURN_SPEED = 360
-FLUSH_EVERY_N_ROWS = 20
+# Robot Movement and Grid Settings
+GRID_SIZE_M = 0.6                   # ขนาดกริดเป็นเมตร
+WALL_THRESHOLD_MM = 450                # เกณฑ์ระยะทางที่ถือว่ามีกำแพง (มม.)
 
-# ========= ค่าคงที่วัดระยะ (จากงานเดิมของคุณ) =========
-# ใช้สองแกน แล้วเฉลี่ย
-KPIX_X = 578.57; OBJ_W_CM = 5.6   # จาก size_x
-KPIX_Y = 587.75; OBJ_H_CM = 14.7  # จากq size_y
+# Gimbal and Vision Settings
+GIMBAL_TURN_SPEED = 360                # ความเร็วหมุนกิมบอล (องศา/วินาที)
+CAMERA_HORIZONTAL_FOV = 96             # มุมมองกล้องแนวนอน (องศา)
+VISION_SCAN_DURATION_S = 1             # ระยะเวลาสแกน vision (วินาที)
 
-# ========= เกณฑ์การตรวจจับ =========
-TEMPLATE_MATCH_THRESHOLD = 0.40  # เกณฑ์ผ่าน
-HSV_H_LO, HSV_H_HI = 25, 40
-HSV_S_MIN = 100
-HSV_V_MIN = 70
+# Direction Mappings
+ORIENTATIONS = {
+    0: "North", 
+    1: "East", 
+    2: "South", 
+    3: "West"
+}
 
-TEMPLATE_PATHS = [
-    r"find_coke\box_1_test.jpg",
-    r"find_coke\box_2_test.jpg",
-    r"find_coke\box_3_test.jpg",
-]
+WALL_NAMES = {
+    0: "North Wall", 
+    1: "East Wall", 
+    2: "South Wall", 
+    3: "West Wall"
+}
 
-# ========= PID =========
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def wrap_angle_deg(angle_deg: float) -> float:
+    """ห่อมุมให้อยู่ในช่วง (-180, 180]"""
+    while angle_deg <= -180.0:
+        angle_deg += 360.0
+    while angle_deg > 180.0:
+        angle_deg -= 360.0
+    return angle_deg
+
+def sub_angle(a_deg: float, b_deg: float) -> float:
+    """คืนค่า (a - b) แบบ wrap ในช่วง (-180, 180]"""
+    return wrap_angle_deg(a_deg - b_deg)
+
+
+# =============================================================================
+# DATA HANDLERS AND SENSOR MANAGEMENT
+# =============================================================================
 class PID:
     def __init__(self, kp=0.2, ki=0.0, kd=0.0, integ_clip=40.0, out_clip=10.0):
         self.kp, self.ki, self.kd = kp, ki, kd
@@ -57,237 +111,1469 @@ class PID:
         out = self.kp*err + self.ki*self.integ + self.kd*deriv
         return max(-self.out_clip, min(self.out_clip, out))
 
-# ========= utils =========
-def _clip(v, lo, hi): return max(lo, min(int(v), hi))
 
-def _tight_bbox_from_mask(mask_bool):
-    ys, xs = np.where(mask_bool)
-    if ys.size == 0: return None
-    y0, y1 = int(ys.min()), int(ys.max())+1
-    x0, x1 = int(xs.min()), int(xs.max())+1
-    return x0, y0, x1, y1  # x_min, y_min, x_max(excl), y_max(excl)
+                
+class TofDataHandler:
+    """จัดการข้อมูลจาก ToF sensor ด้วย median filtering"""
+    
+    def __init__(self, window_size=3):
+        self._lock = threading.Lock()
+        self.raw_distance = 0.0
+        self._window = deque(maxlen=window_size)
+        self._median = 0.0
 
-def _tpl_to_bin_u8(img_bgr):
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    _, _, v = cv2.split(hsv)
-    return (v > 100).astype(np.uint8) * 255
+    def update(self, sub_info):
+        """อัปเดตค่า ToF จาก callback"""
+        d = float(sub_info[0]) if sub_info else 0.0
+        with self._lock:
+            self.raw_distance = d
+            self._window.append(d)
+            self._median = statistics.median(self._window)
 
-def detect_and_measure(img_bgr):
+    def get_distance(self):
+        """คืนค่าระยะทางที่กรองแล้ว (median)"""
+        with self._lock:
+            return self._median if self._window else self.raw_distance
+
+    def get_raw_distance(self):
+        with self._lock:
+            return self.raw_distance
+
+
+class GimbalDataHandler:
+    """จัดการข้อมูลมุมกิมบอล (yaw, pitch)"""
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.yaw = 0.0
+        self.pitch = 0.0
+
+    def update(self, angle_info):
+        """อัปเดตมุมกิมบอลจาก callback"""
+        with self._lock:
+            self.yaw = float(angle_info[0])
+            self.pitch = float(angle_info[1])
+
+    def get_yaw_pitch(self):
+        """คืนค่ามุม (yaw, pitch)"""
+        with self._lock:
+            return (self.yaw, self.pitch)
+
+
+class PoseDataHandler:
+    """จัดการข้อมูลตำแหน่งและทิศทางของหุ่นยนต์"""
+    
+    def __init__(self):
+        self.pose = [0.0] * 6  # [x, y, z, yaw, pitch, roll]
+        self._lock = threading.Lock()
+        
+    def update_position(self, pos_info):
+        """อัปเดตตำแหน่ง (x, y, z)"""
+        with self._lock:
+            self.pose[0], self.pose[1], self.pose[2] = pos_info[0], pos_info[1], pos_info[2]
+            
+    def update_attitude(self, att_info):
+        """อัปเดตทิศทาง (yaw, pitch, roll)"""
+        with self._lock:
+            self.pose[3], self.pose[4], self.pose[5] = att_info[0], att_info[1], att_info[2]
+            
+    def get_pose(self):
+        """คืนค่า pose ทั้งหมด"""
+        with self._lock:
+            return tuple(self.pose)
+            
+    def set_xy(self, x_m, y_m):
+        """กำหนดตำแหน่ง x, y"""
+        with self._lock:
+            self.pose[0], self.pose[1] = float(x_m), float(y_m)
+            
+    def set_yaw(self, yaw_deg):
+        """กำหนดทิศทาง yaw"""
+        with self._lock:
+            self.pose[3] = float(yaw_deg)
+
+
+# =============================================================================
+# MAP AND NAVIGATION CLASSES
+# =============================================================================
+
+class RobotMap:
+    """จัดการแผนที่และเส้นทางของหุ่นยนต์"""
+    
+    def __init__(self):
+        self.graph = {}           # กราฟเชื่อมต่อระหว่างช่อง
+        self.explored = set()     # ช่องที่สำรวจแล้ว
+        self.blocked = set()      # ขอบที่ปิดกั้น (กำแพง)
+        
+    def add_connection(self, pos1, pos2):
+        """เพิ่มการเชื่อมต่อระหว่างสองช่อง"""
+        if pos1 not in self.graph: 
+            self.graph[pos1] = set()
+        if pos2 not in self.graph: 
+            self.graph[pos2] = set()
+        if pos2 not in self.graph[pos1]:
+            self.graph[pos1].add(pos2)
+            self.graph[pos2].add(pos1)
+
+    def add_blocked(self, pos1, pos2):
+        """เพิ่มขอบที่ปิดกั้น (กำแพง)"""
+        edge = tuple(sorted([pos1, pos2]))
+        self.blocked.add(edge)
+        
+    def mark_explored(self, position):
+        """ทำเครื่องหมายช่องที่สำรวจแล้ว"""
+        self.explored.add(position)
+        
+    def get_unexplored_neighbors(self, position):
+        """หาช่องใกล้เคียงที่ยังไม่ได้สำรวจ"""
+        if position not in self.graph: 
+            return []
+        return [n for n in self.graph.get(position, []) if n not in self.explored]
+        
+    def get_path(self, start, goal):
+        """หาเส้นทางจาก start ไป goal ด้วย BFS"""
+        if start == goal: 
+            return [start]
+        queue = [(start, [start])]
+        visited = {start}
+        print(f"Finding path from {start} to {goal}")
+        while queue:
+            current, path = queue.pop(0)
+            for neighbor in self.graph.get(current, []):
+                if neighbor not in visited:
+                    if neighbor == goal: 
+                        return path + [neighbor]
+                    visited.add(neighbor)
+                    queue.append((neighbor, path + [neighbor]))
+        return None
+
+
+
+class PIDController:
+    """ตัวควบคุม PID สำหรับการเคลื่อนที่"""
+    
+    def __init__(self, Kp, Ki, Kd, setpoint=0.0, output_limits=(-1.0, 1.0)):
+        self.Kp, self.Ki, self.Kd = Kp, Ki, Kd
+        self.setpoint = setpoint
+        self.output_limits = output_limits
+        self._integral = 0.0
+        self._previous_error = 0.0
+        self._last_time = time.time()
+        
+    def update(self, current_value):
+        """อัปเดตผลลัพธ์ PID"""
+        current_time = time.time()
+        dt = current_time - self._last_time
+        if dt <= 0: 
+            return 0.0
+        error = self.setpoint - current_value
+        self._integral += error * dt
+        derivative = (error - self._previous_error) / dt
+        output = (self.Kp * error) + (self.Ki * self._integral) + (self.Kd * derivative)
+        if self.output_limits:
+            output = max(self.output_limits[0], min(self.output_limits[1], output))
+        self._previous_error = error
+        self._last_time = current_time
+        return output
+
+
+# =============================================================================
+# MAIN MAZE EXPLORER CLASS
+# =============================================================================
+
+class MazeExplorer:
     """
-    return:
-      vis_bgr, center_xy or None, conf(float), size_x(int), size_y(int), dist_x_cm(float), dist_y_cm(float), dist_avg_cm(float)
+    คลาสหลักสำหรับควบคุมหุ่นยนต์สำรวจเขาวงกต
+    
+    Features:
+    - สำรวจเขาวงกตแบบอัตโนมัติ
+    - ใช้ ToF + IR sensors
+    - Real-time mapping
+    - Complete exploration only
+    - CSV logging
     """
-    H, W = img_bgr.shape[:2]
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
-    mask = (h > HSV_H_LO) & (h < HSV_H_HI) & (s > HSV_S_MIN) & (v > HSV_V_MIN)
-    mask_u8 = (mask.astype(np.uint8) * 255)
+    
+    def __init__(self, ep_robot, tof_handler, gimbal_handler, pose_handler):
+        """
+        Initialize MazeExplorer
+        
+        Args:
+            ep_robot: RoboMaster robot instance
+            tof_handler: ToF sensor data handler
+            vision_handler: Vision/marker detection handler
+            gimbal_handler: Gimbal angle handler
+            pose_handler: Robot pose handler
+        """
+        # Robot hardware interfaces
+        self.ep_robot = ep_robot
+        self.ep_chassis = ep_robot.chassis
+        self.ep_led = ep_robot.led
+        self.ep_gimbal = ep_robot.gimbal
+        self.ep_adaptor = ep_robot.sensor_adaptor
+        self.ep_camera = ep_robot.camera
+        self.blaster = blaster
+        self.ep_blaster = ep_robot.blaster
+        # Data handlers
+        self.tof_handler = tof_handler
+        self.gimbal_handler = gimbal_handler
+        self.pose_handler = pose_handler
+        self.last_time = time.monotonic()
+        # Navigation state
+        self.shoot_grid = []
+        self.visited_for_check = []
+        self.current_position = (0, 0)
+        self.current_orientation = 0  # 0:N, 1:E, 2:S, 3:W
+        self.internal_map = RobotMap()
+        self.visited_path = [self.current_position]
+        
+        # Exploration settings
+        self.border = (3, 3)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.step_counter = 0  # นับจำนวนช่องที่เดิน
+        
+        # Exploration settings
+        self.exploration_complete = False  # flag สำรวจครบหรือยัง
+        
+        # Marker detection (ถ้าต้องการใช้)
+        self.marker_map = {}  # {name: [{grid_pos:(x,y), wall:str, offset_m:float}]}
+        
+        # Real-time plotting
+        self.real_time_plot = True
+        self.fig = None
+        self.ax = None
+        
+        # Initialize robot
+        self.ep_led.set_led(r=0, g=0, b=255)
+        self.pose_handler.set_xy(0.0, 0.0)
+        self.pose_handler.set_yaw(0.0)
+        
+        # Logging
+        self.scan_log = []      # สแกนแต่ละกริด
+        self.wall_log = set()   # กำแพงที่พบ
+        self.path_log = []      # เส้นทางที่เดิน
+        self.continuous_sensor_log = []  # บันทึกเซ็นเซอร์ต่อเนื่อง
 
-    # โหลด template
-    tpl_bins = []
-    for p in TEMPLATE_PATHS:
-        t = cv2.imread(p)
-        if t is None:
-            raise FileNotFoundError(f"ไม่พบไฟล์เทมเพลต: {p}")
-        tpl_bins.append(_tpl_to_bin_u8(t))
+        self.detected_targets = []        # list ของเป้าหมายที่เจอ/ยิง
+        self.targets_json_path = None    # path ไฟล์ targets_*.json
+        self.map_state_json_path = None   # path ไฟล์ map_state_*.json
 
-    # ตรวจสอบขนาด
-    for i, T in enumerate(tpl_bins):
-        th, tw = T.shape[:2]
-        if th > H or tw > W:
-            raise ValueError(f"Template index {i} ใหญ่กว่าภาพ (th={th}, tw={tw}, H={H}, W={W})")
+        # Logging thread
+        self._logging_thread = None
+        self._logging_thread_active = False
+       
+        self.ep_robot = ep_robot
+        self.ep_camera = ep_robot.camera
+        self.ep_gimbal = ep_robot.gimbal
+        self.ep_blaster = ep_robot.blaster
+        self.last_time = time.monotonic()
+        
+        # Color ranges (HSV)
+        self.color_ranges = {
+            # red ต้อง 2 ช่วง: 0–25 และ 170–180 (tuple ของคู่ช่วงสี)
+            'brown_red': (([0, 120, 70], [10, 255, 255]), ([170, 120, 70], [180, 255, 255])),
+            'dark_green': ([40, 60, 20],   [85, 255, 180]),
+            'yellow_brown': ([18, 100, 100],[40, 255, 255]),
+            'dark_blue': ([95, 70, 20],    [130, 255, 200])
+        }
+        
+        # Color mapping
+        self.colors = {
+            'red': "brown_red",
+            'green': "dark_green", 
+            'yellow': "yellow_brown",
+            'blue': "dark_blue",
+        }
+        
+        self.target_color = None
+        self.target_shape = None
+    
+    def set_target(self, color, shape):
+        """ตั้งค่าเป้าหมาย"""
+        self.target_color = color
+        self.target_shape = shape
 
-    # template matching
-    scores = []
-    locs = []
-    sizes = []
-    for T in tpl_bins:
-        val = cv2.matchTemplate(mask_u8, T, cv2.TM_CCOEFF_NORMED)
-        _, m, _, loc = cv2.minMaxLoc(val)
-        scores.append(m); locs.append(loc); sizes.append(T.shape[:2])
+    def detect_and_shot(self):
+        """
+        Phase 1: สแกนทั้งภาพ เก็บวัตถุทั้งหมดของกริดปัจจุบันลง self.shoot_grid ในรูปแบบ
+                 (pos, orientation, [(color, shape), ...])
+        Phase 2: ถ้ามี (target_color, target_shape) ในรายการของกริดนี้ ค่อยเข้า loop หลักเล็ง/ยิง
+        """
 
-    best_idx = int(np.argmax(scores))
-    max_val = float(scores[best_idx])
-    top_left = locs[best_idx]
-    th, tw = sizes[best_idx]
+        # -------- Phase 1: Full-frame scan to populate shoot_grid --------
+        if not isinstance(self.shoot_grid, list):
+            self.shoot_grid = []
 
-    vis = img_bgr.copy()
-    cx = cy = np.nan
-    size_x = size_y = 0
-    dist_x = dist_y = dist_avg = 0.0
-    center = None
+        detections = []  # list[(user_color, shape, (cx,cy))]
+        try:
+            self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+            time.sleep(0.5)
+            img_full = self.ep_camera.read_cv2_image(strategy="newest", timeout=2)
+        except queue.Empty:
+            img_full = None
 
-    if max_val > TEMPLATE_MATCH_THRESHOLD:
-        # window จากตำแหน่งแมตช์
-        x0, y0 = int(top_left[0]), int(top_left[1])
-        x1, y1 = x0 + tw, y0 + th
-        x0c, y0c = _clip(x0, 0, W-1), _clip(y0, 0, H-1)
-        x1c, y1c = _clip(x1, 1, W), _clip(y1, 1, H)
+        if img_full is not None:
+            blur_full = cv2.GaussianBlur(img_full, (5, 5), 0)
+            hsv_full = cv2.cvtColor(blur_full, cv2.COLOR_BGR2HSV)
 
-        win_mask = mask[y0c:y1c, x0c:x1c]
-        tight = _tight_bbox_from_mask(win_mask)
-        if tight is not None:
-            tx0, ty0, tx1, ty1 = tight
-            X0, Y0 = x0c + tx0, y0c + ty0
-            X1, Y1 = x0c + tx1, y0c + ty1
-            cv2.rectangle(vis, (X0, Y0), (X1, Y1), (0, 255, 0), 2)
+            def build_mask(hsv_img, color_data):
+                is_dual = (
+                    isinstance(color_data, tuple)
+                    and len(color_data) == 2
+                    and all(isinstance(r, (list, tuple, np.ndarray)) and len(r) == 2 for r in color_data)
+                )
+                if is_dual:
+                    (l1, u1), (l2, u2) = color_data
+                    m1 = cv2.inRange(hsv_img, np.array(l1, np.uint8), np.array(u1, np.uint8))
+                    m2 = cv2.inRange(hsv_img, np.array(l2, np.uint8), np.array(u2, np.uint8))
+                    return cv2.bitwise_or(m1, m2)
+                lb = np.array(color_data[0], np.uint8)
+                ub = np.array(color_data[1], np.uint8)
+                return cv2.inRange(hsv_img, lb, ub)
 
-            size_x = int(X1 - X0)
-            size_y = int(Y1 - Y0)
+            def classify_shape(cnt):
+                area = cv2.contourArea(cnt)
+                if area < 150:
+                    return None
+                peri = cv2.arcLength(cnt, True)
+                approx = cv2.approxPolyDP(cnt, 0.02 * max(1.0, peri), True)
+                v = len(approx)
+                if v == 3:
+                    return 'triangle'
+                if v == 4:
+                    x, y, wb, hb = cv2.boundingRect(cnt)
+                    ar = float(wb) / max(1.0, hb)
+                    if 0.85 <= ar <= 1.15:
+                        return 'square'
+                    elif ar > 1.15:
+                        return 'horizontal_rectangle'
+                    else:
+                        return 'vertical_rectangle'
+                if v >= 8:
+                    circ = 4.0 * np.pi * area / max(peri * peri, 1e-6)
+                    if circ > 0.7:
+                        return 'circle'
+                return None
 
-            if size_x > 0: dist_x = KPIX_X * OBJ_W_CM / float(size_x)
-            if size_y > 0: dist_y = KPIX_Y * OBJ_H_CM / float(size_y)
-            # ถ้ามีทั้งสองแกน ใช้เฉลี่ย, ถ้ามีแกนเดียว ใช้อันนั้น
-            if dist_x > 0 and dist_y > 0:
-                dist_avg = 0.5 * (dist_x + dist_y)
-            else:
-                dist_avg = max(dist_x, dist_y)
+            reverse_color = {v: k for k, v in self.colors.items()} if hasattr(self, 'colors') else {}
 
-            cx = int((X0 + X1) / 2)
-            cy = int((Y0 + Y1) / 2)
-            center = (cx, cy)
+            for color_key, color_data in self.color_ranges.items():
+                mask = build_mask(hsv_full, color_data)
+                kernel = np.ones((3, 3), np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    shp = classify_shape(cnt)
+                    if not shp:
+                        continue
+                    x, y, wb, hb = cv2.boundingRect(cnt)
+                    cx, cy = x + wb // 2, y + hb // 2
+                    user_color = reverse_color.get(color_key, color_key)
+                    detections.append((user_color, shp, (cx, cy)))
+                
 
-            # วาด crosshair/ข้อความ
-            cv2.circle(vis, (cx, cy), 4, (0, 255, 255), -1)
-            cv2.circle(vis, (W//2, H//2), 4, (255, 0, 0), -1)
-            cv2.line(vis, (W//2, 0), (W//2, H), (255, 0, 0), 1)
-            cv2.line(vis, (0, H//2), (W, H//2), (255, 0, 0), 1)
-            cv2.putText(vis, f"conf={max_val:.2f}  w={size_x}px h={size_y}px",
-                        (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
-            cv2.putText(vis, f"dist_x={dist_x:.2f}cm  dist_y={dist_y:.2f}cm  avg={dist_avg:.2f}cm",
-                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
-        else:
-            max_val = 0.0  # หน้าต่างไม่มีพิกเซลผ่าน mask
-    else:
-        # ไม่ผ่านเกณฑ์
-        pass
+        # --- merge เข้ารูปแบบใหม่ของ shoot_grid: (pos, ori, [(color,shape), ...]) ---
+        pos = self.current_position
+        ori = self.current_orientation
+        entry_idx = None
+        for i, entry in enumerate(self.shoot_grid):
+            if len(entry) == 4:
+                # migrate เก่า -> ใหม่
+                p, o, c_old, s_old = entry
+                self.shoot_grid[i] = (p, o, [(c_old, s_old)])
+                entry = self.shoot_grid[i]
+            if len(entry) == 3 and entry[0] == pos and entry[1] == ori:
+                entry_idx = i
+                break
+        if entry_idx is None:
+            self.shoot_grid.append((pos, ori, []))
+            entry_idx = len(self.shoot_grid) - 1
 
-    return vis, center, max_val, size_x, size_y, dist_x, dist_y, dist_avg
+        p, o, cs_list = self.shoot_grid[entry_idx]
+        # ไม่ dedupe ด้วย set อีกต่อไป เพื่อให้เก็บ "หลายอันชนิดเดียวกัน" ได้
+        for c, s, _center in detections:
+            cs_list.append((c, s))
+        self.shoot_grid[entry_idx] = (p, o, cs_list)
 
-def safe_flush(file_obj, path):
-    try:
-        file_obj.flush(); os.fsync(file_obj.fileno())
-    except Exception as e:
-        print("Flush/Fsync error:", repr(e), file=sys.stderr)
-
-def abs_path(p):
-    try: return os.path.abspath(p)
-    except Exception: return p
-
-if __name__ == "__main__":
-    print("Working directory:", abs_path(os.getcwd()))
-    print(f"HFOV={CAMERA_HFOV_DEG:.2f}°, VFOV={CAMERA_VFOV_DEG:.2f}°")
-
-    ep_robot = None; ep_camera = None; ep_gimbal = None
-
-    try:
-        ep_robot = robot.Robot(); ep_robot.initialize(conn_type="ap")
-        ep_gimbal = ep_robot.gimbal
-        ep_camera = ep_robot.camera
-
-        try: ep_gimbal.recenter().wait_for_completed()
-        except Exception: pass
-
-        # ---- seed/subscribe มุมกิมบอล (กันค่าว่าง) ----
-        gimbal_state = {"yaw": 0.0, "pitch": 0.0}
-        _got = {"ok": False}
-        def _gimbal_cb(ang):
-            pitch_angle, yaw_angle, pitch_ground_angle, yaw_ground_angle = ang
-            gimbal_state["yaw"]   = float(yaw_angle)
-            gimbal_state["pitch"] = float(pitch_angle)
-            _got["ok"] = True
-        ep_gimbal.sub_angle(freq=20, callback=_gimbal_cb)
-
-        t_wait0 = time.monotonic()
-        while not _got["ok"] and (time.monotonic()-t_wait0) < 1.0:
-            time.sleep(0.01)
-
-        est_yaw = gimbal_state["yaw"]
-        est_pitch = gimbal_state["pitch"]
-
-        ep_camera.start_video_stream(display=False, resolution="720p")
-        print("เริ่มสตรีม — กด Q เพื่อออก")
-
-        pid_yaw   = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
-        pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip= 8.0)
-
-        t0 = time.monotonic(); last_t = t0
-
+        # gate เข้า Phase 2 เฉพาะเมื่อมีคู่เป้าหมายอย่างน้อยหนึ่งตัว
+        if (self.target_color, self.target_shape) not in cs_list:
+            print(f"⚠️ ไม่พบ {self.target_color}-{self.target_shape} ในกริด {pos} ori={ori}; ข้ามการเล็งยิง")
+            return None
+        print(self.shoot_grid)
+        # -------- Phase 2: Original aim and fire loop --------
+        pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
+        pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
+        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+        tof_dist = self.tof_handler.get_distance()
+        self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
+        center_x = center_y = None
+        err_x = err_y = 0.0
+        yaw_cmd = pitch_cmd = 0.0
+        have_object = False  # เพิ่มการประกาศตัวแปร
+        time.sleep(0.5)
+        timebefore = time.monotonic()
         while True:
-            frame = ep_camera.read_cv2_image(strategy="newest", timeout=2)
-            now = time.monotonic(); dt = now - last_t; last_t = now
-            if frame is None:
-                time.sleep(0.01); continue
+                try:
+                    img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
+                    if img is None:
+                        continue
+                except queue.Empty:
+                    continue
+                # แปลงชื่อสีเก่าเป็นใหม่ (ถ้าจำเป็น)
+                color_key = self.target_color
+                if self.target_color in self.colors:
+                    color_key = self.colors[self.target_color]
+                
+                # ตรวจสอบว่ามีสีที่ต้องการหรือไม่
+                if color_key not in self.color_ranges:
+                    print(f"⚠️ ไม่พบสี '{self.target_color}' ในระบบ")
+                    return []
+                # ROI (กลางภาพ)
+                h, w = img.shape[:2]
+                roi_w, roi_h = min(800, w), min(450, h)
+                roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
+                roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+                
+                # แปลง HSV และสร้าง mask (เพิ่มการเบลอ + morphology เพื่อลด noise)
+                blur = cv2.GaussianBlur(roi, (5, 5), 0)
+                hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+                color_data = self.color_ranges[color_key]
+                
+                # สร้าง mask จากช่วงสี (รองรับกรณีแดง 2 ช่วง)
+                is_dual_range = (
+                    isinstance(color_data, tuple)
+                    and len(color_data) == 2
+                    and all(
+                        isinstance(r, (list, tuple, np.ndarray)) and len(r) == 2
+                        for r in color_data
+                    )
+                )
+                if is_dual_range:
+                    (lower1, upper1), (lower2, upper2) = color_data
+                    mask1 = cv2.inRange(hsv, np.array(lower1, dtype=np.uint8), np.array(upper1, dtype=np.uint8))
+                    mask2 = cv2.inRange(hsv, np.array(lower2, dtype=np.uint8), np.array(upper2, dtype=np.uint8))
+                    mask = cv2.bitwise_or(mask1, mask2)
+                else:
+                    lower_bound = np.array(color_data[0], dtype=np.uint8)
+                    upper_bound = np.array(color_data[1], dtype=np.uint8)
+                    mask = cv2.inRange(hsv, lower_bound, upper_bound)
 
-            vis, center, conf, sx, sy, dx, dy, davg = detect_and_measure(frame)
 
-            yaw_err_deg = pitch_err_deg = 0.0
-            yaw_cmd = pitch_cmd = 0.0
-            cx = cy = ""
 
-            if center is not None:
-                cx_i, cy_i = center
-                cx, cy = int(cx_i), int(cy_i)
+                kernel = np.ones((5, 5), np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+                # หา contours
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    
+                    if cv2.contourArea(cnt) < 200:
+                        continue
+                    
+                    # ตรวจจับรูปทรง
+                    perimeter = cv2.arcLength(cnt, True)
+                    approx = cv2.approxPolyDP(cnt, 0.02 * perimeter, True)
+                    vertices = len(approx)
+                    
+                    shape = None
+                    if vertices >= 8:
+                        area = cv2.contourArea(cnt)
+                        circularity = 4 * np.pi * area / (perimeter * perimeter)
+                        if circularity > 0.7:
+                            shape = 'circle'
+                    elif vertices == 3:
+                        shape = 'triangle'
+                    elif vertices == 4:
+                        # ใช้ bounding box เพื่อแยกประเภทสี่เหลี่ยม
+                        x, y, w_box, h_box = cv2.boundingRect(cnt)
+                        aspect_ratio = float(w_box) / h_box
+                        
+                        if 0.9 <= aspect_ratio <= 1.1:
+                            shape = 'square'  # สี่เหลี่ยมจัตุรัส
+                        elif aspect_ratio > 1.3:
+                            shape = 'horizontal_rectangle'  # สี่เหลี่ยมผืนผ้าแนวนอน (กว้างมากกว่าสูง)
+                        elif aspect_ratio < 0.7:
+                            shape = 'vertical_rectangle'  # สี่เหลี่ยมผืนผ้าแนวตั้ง (สูงมากกว่ากว้าง)
+                        else:
+                            shape = 'rectangle'  # สี่เหลี่ยมทั่วไป
+                    
+                    if shape == self.target_shape:
+                        x, y, w_box, h_box = cv2.boundingRect(cnt)
+                        center_x = roi_x + x + w_box // 2
+                        center_y = roi_y + y + h_box // 2
+                        break  # เจอแล้วออกจาก loop
 
-                # error เป็นองศาตามสัดส่วนพิกเซล
-                half_w = CAMERA_W / 2.0
-                half_h = CAMERA_H / 2.0
-                err_x = (cx - half_w) / half_w
-                err_y = (cy - half_h) / half_h
+                # วาดกรอบและข้อความ (ถ้าเจอวัตถุ)
+                if center_x is not None and center_y is not None:
+                    cv2.rectangle(img, (center_x-15, center_y-15), (center_x+30, center_y+30), (0, 255, 0), 2)
+                    cv2.putText(img, f"{self.target_shape}", (center_x-40, center_y-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                yaw_err_deg   =  err_x * (CAMERA_HFOV_DEG/2.0)
-                pitch_err_deg = -err_y * (CAMERA_VFOV_DEG/2.0)
-
-                yaw_cmd   = pid_yaw.step(yaw_err_deg, dt)
-                pitch_cmd = pid_pitch.step(pitch_err_deg, dt)
-
-                if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05:
-                    try:
-                        ep_gimbal.move(yaw=yaw_cmd, pitch=pitch_cmd,
-                                       yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED
-                                       ).wait_for_completed()
-                    except Exception:
+            
+                # แสดงข้อมูล
+                cv2.putText(img, f"Detecting: {self.target_color} {self.target_shape}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(img, f"Found: {1 if center_x is not None and center_y is not None else 0} objects", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(img, "Press 'q' to quit", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                
+                cv2.imshow("RoboMaster Detection", img)
+                # แสดงหน้าต่าง mask เพื่อ debug สี (ช่วยหาช่วง HSV)
+                try:
+                    cv2.imshow("Mask", mask)
+                except Exception:
+                    pass
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("🔴 User pressed 'q' - exiting detection")
+                    break
+                
+                now = time.monotonic()
+                dt = now - self.last_time
+                self.last_time = now
+                camera_w = 1280//2
+                camera_h = 720//2
+                if center_x is not None and center_y is not None and tof_dist < 1000 and tof_dist>300:
+                    have_object = True
+                    err_x = (center_x - camera_w)
+                    err_y = (center_y - camera_h)
+                    yaw_cmd = pid_yaw.step(err_x, dt)
+                    pitch_cmd = pid_pitch.step(err_y, dt)
+                    if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05 :
                         try:
-                            ep_gimbal.move(yaw=yaw_cmd, pitch=pitch_cmd,
-                                           yaw_speed=GIMBAL_TURN_SPEED, pitch_speed=GIMBAL_TURN_SPEED)
+                            self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
                         except Exception:
-                            pass
+                            try:
+                                self.ep_gimbal.drive_speed(pitch_speed=pitch_cmd, yaw_speed=yaw_cmd)
+                            except Exception:
+                                pass
+                    else:
+                        # เป้าอยู่ตรงกลางแล้ว - ยิงและออก
+                        print("🎯 Target centered - firing and exiting")
+                        self.ep_blaster.fire(times=3)
+                        time.sleep(1)
+                        self.ep_blaster.fire(times=3)
+                        time.sleep(1)
+                        self.ep_blaster.fire(times=3)
+                        time.sleep(1)
+                        self.record_target_hit(self.target_color, self.target_shape)  # recorded
+                        self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+                        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+                        cv2.destroyAllWindows()
+                        # no legacy append to shoot_grid here; Phase 1 already stored entries
+                        break
+
+                elif center_x is None and center_y is None and time.monotonic() - timebefore < 10.0 and have_object and tof_dist < 1000 and tof_dist > 300:
+                    self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+                    pid_yaw.integ *= 0.9
+                    pid_pitch.integ *= 0.9
+                elif center_x is None and center_y is None and time.monotonic() - timebefore > 3.0 and not have_object and tof_dist < 1000 and tof_dist > 300:
+                    self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+                    cv2.destroyAllWindows()
+                    break
+                elif time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist > 300:
+                    self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+                    cv2.destroyAllWindows()
+                    break
+                elif tof_dist > 1000 or tof_dist < 300:
+                    self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+                    cv2.destroyAllWindows()
+                    break
+                # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
+                center_x = center_y = None
+        # end detect_and_shot
+    # -------------------- Continuous Sensor Logging (NEW) --------------------
+    def _continuous_log_worker(self, frequency_hz=10):
+        print(f"[Logging Thread] Started. Logging at {frequency_hz} Hz.")
+        period = 1.0 / max(1, frequency_hz)
+        while self._logging_thread_active:
+            t0 = time.time()
+            try:
+                x, y, z, yaw, pitch, roll = self.pose_handler.get_pose()
+                tof = self.tof_handler.get_distance()
+            
+                self.continuous_sensor_log.append({
+                    "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+                    "pos_x_m": x, "pos_y_m": y, "pos_z_m": z,
+                    "att_yaw_deg": yaw, "att_pitch_deg": pitch, "att_roll_deg": roll,
+                    "tof_distance_mm": tof,
+                })
+            except Exception as e:
+                print(f"[Logging Thread] Error: {e}")
+            dt = time.time() - t0
+            if dt < period:
+                time.sleep(period - dt)
+        print("[Logging Thread] Stopped.")
+
+    def start_continuous_logging(self, frequency_hz=10):
+        if not self._logging_thread_active:
+            self._logging_thread_active = True
+            self._logging_thread = threading.Thread(
+                target=self._continuous_log_worker, kwargs={"frequency_hz": frequency_hz}, daemon=True
+            )
+            self._logging_thread.start()
+
+    def stop_continuous_logging(self):
+        if self._logging_thread_active:
+            self._logging_thread_active = False
+            if self._logging_thread:
+                self._logging_thread.join(timeout=2.0)
+
+    # ------------------------------------------------------------------------
+    def save_csv_logs(self):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # 1) continuous sensor log
+        if self.continuous_sensor_log:
+            try:
+                with open(f"continuous_sensor_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
+                    fieldnames = ["timestamp", "pos_x_m", "pos_y_m", "pos_z_m",
+                                  "att_yaw_deg", "att_pitch_deg", "att_roll_deg",
+                                  "tof_distance_mm"]
+                    w = csv.DictWriter(f, fieldnames=fieldnames)
+                    w.writeheader()
+                    w.writerows(self.continuous_sensor_log)
+                print(f"[CSV] continuous_sensor_log_{ts}.csv saved")
+            except Exception as e:
+                print(f"[CSV] Error saving continuous log: {e}")
+
+        # 2) scan per grid
+        if self.scan_log:
+            with open(f"scan_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=["ts","grid_x","grid_y","N_mm","E_mm","S_mm","W_mm"])
+                w.writeheader()
+                for r in self.scan_log: w.writerow(r)
+
+        # 3) closed walls
+        if self.wall_log:
+            with open(f"walls_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["cell1_x","cell1_y","cell2_x","cell2_y"])
+                for (a,b) in sorted(self.wall_log):
+                    w.writerow([a[0],a[1],b[0],b[1]])
+
+
+        # 5) visited path
+        if self.visited_path:
+            with open(f"path_log_{ts}.csv", "w", newline='', encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["step","grid_x","grid_y"])
+                for i, (gx,gy) in enumerate(self.visited_path):
+                    w.writerow([i,gx,gy])
+    def adc_to_distance_left(self, adc_value):
+        """
+        แปลงค่า ADC เป็น mm สำหรับ Sharp Left
+        ข้อมูลการวัด:
+        150mm -> 224 ADC
+        100mm -> 357 ADC
+        50mm  -> 698 ADC
+        
+        ใช้ linear interpolation และ extrapolation
+        """
+        if adc_value <= 0:
+            return 999  # Invalid reading
+        
+        # ข้อมูลจุดอ้างอิง (adc, distance)
+        points = [(224, 150), (357, 100), (698, 50)]
+        
+        # หาจุดที่ใกล้ที่สุด 2 จุดสำหรับ interpolation
+        if adc_value <= 224:
+            # Extrapolate จากจุดแรกสองจุด
+            x1, y1 = 224, 150
+            x2, y2 = 357, 100
+        elif adc_value <= 357:
+            # Interpolate ระหว่างจุดแรกและจุดที่สอง
+            x1, y1 = 224, 150
+            x2, y2 = 357, 100
+        elif adc_value <= 698:
+            # Interpolate ระหว่างจุดที่สองและจุดที่สาม
+            x1, y1 = 357, 100
+            x2, y2 = 698, 50
+        else:
+            # Extrapolate จากจุดสุดท้ายสองจุด
+            x1, y1 = 357, 100
+            x2, y2 = 698, 50
+        
+        # Linear interpolation: y = y1 + (y2-y1) * (x-x1) / (x2-x1)
+        distance = y1 + (y2 - y1) * (adc_value - x1) / (x2 - x1)
+        
+        return max(20, min(300, distance))
+
+    def adc_to_distance_right(self, adc_value):
+        """
+        แปลงค่า ADC เป็น mm สำหรับ Sharp Right
+        ข้อมูลการวัด:
+        150mm -> 235 ADC
+        100mm -> 364 ADC
+        50mm  -> 705 ADC
+        
+        ใช้ linear interpolation และ extrapolation
+        """
+        if adc_value <= 0:
+            return 999  # Invalid reading
+        
+        # ข้อมูลจุดอ้างอิง (adc, distance)
+        points = [(235, 150), (364, 100), (705, 50)]
+        
+        # หาจุดที่ใกล้ที่สุด 2 จุดสำหรับ interpolation
+        if adc_value <= 235:
+            # Extrapolate จากจุดแรกสองจุด
+            x1, y1 = 235, 150
+            x2, y2 = 364, 100
+        elif adc_value <= 364:
+            # Interpolate ระหว่างจุดแรกและจุดที่สอง
+            x1, y1 = 235, 150
+            x2, y2 = 364, 100
+        elif adc_value <= 705:
+            # Interpolate ระหว่างจุดที่สองและจุดที่สาม
+            x1, y1 = 364, 100
+            x2, y2 = 705, 50
+        else:
+            # Extrapolate จากจุดสุดท้ายสองจุด
+            x1, y1 = 364, 100
+            x2, y2 = 705, 50
+        
+        # Linear interpolation: y = y1 + (y2-y1) * (x-x1) / (x2-x1)
+        distance = y1 + (y2 - y1) * (adc_value - x1) / (x2 - x1)
+        
+        return max(20, min(300, distance))
+    # ========================================================================
+    # Sensor Scanning Functions
+    # ========================================================================
+    
+    def _read_ir_sensors(self):
+        """อ่านข้อมูลจาก Sharp sensors และ invert ค่า"""
+        sharp_left_raw = self.ep_adaptor.get_adc(id=1, port=2)   # Sharp ซ้าย
+        sharp_right_raw = self.ep_adaptor.get_adc(id=2, port=1)  # Sharp ขวา
+        wall_ir_left = not self.ep_adaptor.get_io(id=1,port=1)
+        wall_ir_right = not  self.ep_adaptor.get_io(id=2,port=2)
+        
+        # Invert ค่า boolean (0->True, 1->False)
+        wall_left_dist = self.adc_to_distance_left(sharp_left_raw)   #samakan
+        wall_right_dist = self.adc_to_distance_right(sharp_right_raw) #samakan
+        print(f"   Sharp sensors: Left={wall_left_dist} (raw:{sharp_left_raw}), Right={wall_right_dist} (raw:{sharp_right_raw})")
+        return wall_ir_left, wall_ir_right, wall_left_dist, wall_right_dist
+
+    def _get_neighbor_position(self, scan_direction):
+        """คำนวณตำแหน่งเพื่อนบ้านตามทิศทาง"""
+        x, y = self.current_position
+        if scan_direction == 0: return (x, y + 1)      # North
+        elif scan_direction == 1: return (x + 1, y)    # East  
+        elif scan_direction == 2: return (x, y - 1)    # South
+        elif scan_direction == 3: return (x - 1, y)    # West
+        return None
+    
+    def _detect_wall_in_direction(self, scan_direction, wall_left, wall_right):
+        """ตรวจจับกำแพงในทิศทางที่กำหนด"""
+        relative_direction = (scan_direction - self.current_orientation + 4) % 4
+        
+        if relative_direction == 0:  # ด้านหน้า -> ใช้ ToF
+            distance_mm = self.tof_handler.get_distance()
+            has_wall = distance_mm < WALL_THRESHOLD_MM
+            print(f"         - ToF Front: {distance_mm:.1f} mm, Wall: {has_wall}")
+            return has_wall, distance_mm
+            
+        elif relative_direction == 1:  # ด้านขวา -> ใช้ IR ขวา
+            distance_mm = 100 if wall_right else 1000
+            has_wall = distance_mm < WALL_THRESHOLD_MM
+            print(f"         - IR Right: Wall={wall_right}")
+            return has_wall, distance_mm
+            
+        elif relative_direction == 3:  # ด้านซ้าย -> ใช้ IR ซ้าย
+            distance_mm = 100 if wall_left else 1000
+            has_wall = distance_mm < WALL_THRESHOLD_MM
+            print(f"         - IR Left: Wall={wall_left}")
+            return has_wall, distance_mm
+            
+        else:  # ด้านหลัง -> สมมติไม่มีกำแพง
+            distance_mm = 1000.0
+            print(f"         - Back: Assuming no wall")
+            return False, distance_mm
+    
+    def scan_surroundings_with_gimbal(self, previous_position=None):
+        """
+        สแกนหากำแพงรอบๆ โดยใช้ ToF (หน้า) และ IR sensors (ซ้าย-ขวา)
+        
+        Args:
+            previous_position: ตำแหน่งก่อนหน้า (ไม่ต้องสแกนทิศนั้น)
+            
+        Returns:
+            dict: ระยะทางที่วัดได้ในแต่ละทิศ
+        """
+        self.ep_led.set_led(r=255, g=255, b=0, effect="breathing")
+        self.internal_map.mark_explored(self.current_position)
+        
+        wall_distances = {}
+        self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
+        direction_to_skip = -1
+        if previous_position:
+            print(f"   -> Path from {previous_position} is known. Adding connection automatically.")
+            self.internal_map.add_connection(self.current_position, previous_position)
+            direction_to_skip = (self.current_orientation + 2) % 4
+            print(f"   -> Will skip physical scan for direction {ORIENTATIONS.get(direction_to_skip, 'N/A')}.")
+
+        # อ่านข้อมูล IR sensors ครั้งเดียว
+        wall_left, wall_right,_,_ = self._read_ir_sensors()
+       
+        # สแกนทั้ง 4 ทิศ
+        for scan_direction in range(4):
+            if scan_direction == direction_to_skip:
+                continue
+                
+            print(f"   Scanning direction: {ORIENTATIONS[scan_direction]}...")
+            
+            neighbor_pos = self._get_neighbor_position(scan_direction)
+            has_wall, distance_mm = self._detect_wall_in_direction(scan_direction, wall_left, wall_right)
+            
+            wall_distances[f'{scan_direction}'] = distance_mm
+
+            # ประมวลผลผลการตรวจจับ
+            if not has_wall:
+                # ไม่มีกำแพง -> เป็นทางเปิด
+                if (neighbor_pos[0] >= 0 and neighbor_pos[1] >= 0 and 
+                    neighbor_pos[0] < self.border[0] and neighbor_pos[1] < self.border[1]):
+                    self.internal_map.add_connection(self.current_position, neighbor_pos)
+                    print(f"           - Open path recorded towards {neighbor_pos}.")
             else:
-                # soften integral ถ้าไม่เห็นเป้า
-                pid_yaw.integ *= 0.9
-                pid_pitch.integ *= 0.9
+                # มีกำแพง -> บล็อกทาง
+                print(f"           - Wall detected. Blocking path to {neighbor_pos}.")
+                self.internal_map.add_blocked(self.current_position, neighbor_pos)
+                self.wall_log.add(tuple(sorted([self.current_position, neighbor_pos])))
 
-            # อัปเดต estimator ให้ไม่ว่าง
-            est_yaw  += yaw_cmd
-            est_pitch += pitch_cmd
-            yaw_out   = gimbal_state["yaw"]   if isinstance(gimbal_state["yaw"], (int,float)) else est_yaw
-            pitch_out = gimbal_state["pitch"] if isinstance(gimbal_state["pitch"], (int,float)) else est_pitch
+        # รีเซ็นเตอร์กิมบอล
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        print("Scan complete using ToF and IR sensors.")
 
-            # overlay เพิ่ม
-            cv2.putText(vis, f"dist_avg={davg:.2f} cm", (10, 78),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
-            cv2.putText(vis, f"yaw_err={yaw_err_deg:+.2f} pitch_err={pitch_err_deg:+.2f}",
-                        (10, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
-            cv2.putText(vis, f"pid_yaw={yaw_cmd:+.2f} pid_pitch={pitch_cmd:+.2f}",
-                        (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,220,255), 2)
+        self._save_scan_results(wall_distances)
 
-            cv2.imshow("Measure + PID track (yellow object)", vis)
-            if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q')):
+
+
+        return wall_distances
+    
+    def _save_scan_results(self, wall_distances):
+        """บันทึกผลการสแกนลงใน scan_log"""
+        x, y = self.current_position
+        self.scan_log.append({
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "grid_x": x, "grid_y": y,
+            "N_mm": wall_distances.get('0', None),
+            "E_mm": wall_distances.get('1', None),
+            "S_mm": wall_distances.get('2', None),
+            "W_mm": wall_distances.get('3', None)
+        })
+    # -------------------- NEW: Target & Map JSON helpers --------------------
+    def record_target_hit(self, color, shape):
+        """บันทึกเหตุการณ์พบ/ยิงเป้าหมาย ณ กริดปัจจุบัน"""
+        gx, gy = self.current_position
+        x_m = gx * GRID_SIZE_M
+        y_m = gy * GRID_SIZE_M
+        _, _, _, yaw_deg, _, _ = self.pose_handler.get_pose()
+        self.detected_targets.append({
+            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "color": color,
+            "shape": shape,
+            "grid": {"x": gx, "y": gy},
+            "orientation": int(self.current_orientation),     # 0=N,1=E,2=S,3=W
+            "orientation_name": ORIENTATIONS.get(self.current_orientation, "?")
+        })
+
+    def save_targets_json(self):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.targets_json_path = f"targets_run1_{ts}.json"
+        payload = {
+            "meta": {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "grid_size_m": GRID_SIZE_M
+            },
+            "targets": self.detected_targets
+        }
+        try:
+            with open(self.targets_json_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            print(f"[JSON] Targets saved → {self.targets_json_path}")
+        except Exception as e:
+                print(f"{e}")
+
+    def save_map_state_json(self):
+        """เซฟกราฟ/กำแพง/พื้นที่ที่สำรวจ/เส้นทาง สำหรับ Lap2"""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.map_state_json_path = f"map_state_run1_{ts}.json"
+
+        # แปลง graph (set/tuple) ให้อยู่ในรูปที่ serialize ได้
+        graph_json = {f"{k[0]},{k[1]}": [[n[0], n[1]] for n in v]
+                      for k, v in self.internal_map.graph.items()}
+        blocked_json = [[[a[0], a[1]], [b[0], b[1]]]
+                        for (a, b) in sorted(self.internal_map.blocked)]
+        explored_json = [[p[0], p[1]] for p in sorted(self.internal_map.explored)]
+        visited_json = [[p[0], p[1]] for p in self.visited_path]
+
+        gx, gy = self.current_position
+        final_world = {"x": gx * GRID_SIZE_M, "y": gy * GRID_SIZE_M}
+
+        payload = {
+            "meta": {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "grid_size_m": GRID_SIZE_M,
+                "border": {"w": self.border[0], "h": self.border[1]},
+                # เปลี่ยนจาก final_yaw → final_orientation (ตามที่เคยบอก)
+                "final_orientation": int(self.current_orientation),
+                "final_orientation_name": ORIENTATIONS.get(self.current_orientation, "?"),
+                "final_position_grid": {"x": gx, "y": gy},
+            },
+            "graph": graph_json,
+            "blocked": blocked_json,
+            "explored": explored_json,
+            "visited_path": visited_json
+        }
+
+        try:
+            with open(self.map_state_json_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            print(f"[JSON] Map state saved → {self.map_state_json_path}")
+        except Exception as e:
+            print(f"[JSON] Error saving map state: {e}")
+
+    # ========================================================================
+    # Navigation Functions
+    # ========================================================================
+    
+
+    def decide_next_path(self):
+        """
+        ตัดสินใจหาเส้นทางถัดไป - สำรวจทั้งหมดเท่านั้น
+        
+        Returns:
+            list: เส้นทางที่ต้องเดิน หรือ None หากสำรวจครบแล้ว
+        """
+        # หาจุดใหม่ที่ยังไม่ได้สำรวจ
+        unexplored = self.internal_map.get_unexplored_neighbors(self.current_position)
+        if unexplored:
+            return [self.current_position, unexplored[0]]
+        
+        # ไม่มีจุดใหม่รอบๆ - ย้อนกลับหาจุดที่มีทางใหม่
+        for pos in reversed(self.visited_path):
+            if self.internal_map.get_unexplored_neighbors(pos):
+                print(f"Backtracking to find unexplored path from {pos}...")
+                return self.internal_map.get_path(self.current_position, pos)
+        
+        # ไม่มีจุดใหม่แล้ว - สำรวจครบแล้ว
+        print(f"\n=== EXPLORATION COMPLETE! ===")
+        print(f"All reachable areas have been explored.")
+        self.exploration_complete = True
+        return None
+
+    # ========================================================================
+    # Real-time Plotting Functions
+    # ========================================================================
+    
+    def init_real_time_plot(self):
+        """เริ่มต้น real-time plotting"""
+        if not self.real_time_plot:
+            return
+            
+        try:
+            plt.ion()  # เปิด interactive mode
+            self.fig, self.ax = plt.subplots(figsize=(8, 8))
+            self.ax.set_title("Robot Map - Real Time")
+            self.ax.set_aspect('equal', adjustable='box')
+            self.ax.grid(True, alpha=0.3)
+            self.ax.set_xlim(-1, self.border[0])
+            self.ax.set_ylim(-1, self.border[1])
+            plt.show(block=False)
+            print("Real-time plotting initialized")
+        except Exception as e:
+            print(f"Failed to initialize real-time plot: {e}")
+            self.real_time_plot = False
+
+    def update_real_time_plot(self):
+        """อัปเดต real-time plot"""
+        if not self.real_time_plot or self.fig is None:
+            return
+            
+        try:
+            # ล้างแผนที่เก่า
+            self.ax.clear()
+            self.ax.set_title(f"Robot Map - Real Time | Position: {self.current_position}")
+            self.ax.set_aspect('equal', adjustable='box')
+            self.ax.grid(True, alpha=0.3)
+            self.ax.set_xlim(-1, self.border[0])
+            self.ax.set_ylim(-1, self.border[1])
+
+            # วาด "ทางเปิด" จาก graph (เส้นบาง)
+            drawn = set()
+            for a, nbs in self.internal_map.graph.items():
+                for b in nbs:
+                    edge = tuple(sorted([a, b]))
+                    if edge in drawn:
+                        continue
+                    drawn.add(edge)
+                    x1, y1 = a
+                    x2, y2 = b
+                    self.ax.plot([x1, x2], [y1, y2], 'b-', linewidth=1.2, alpha=0.5, zorder=1)
+
+            # วาด "กำแพงปิด" จาก blocked (เส้นหนา)
+            for edge in self.internal_map.blocked:
+                (x1, y1), (x2, y2) = edge
+                dx, dy = x2 - x1, y2 - y1
+                if dx == 0 and abs(dy) == 1:
+                    # แนวเดียวกันคอลัมน์ (เหนือ-ใต้) -> กำแพงแนวนอนที่กึ่งกลาง
+                    y_mid = (y1 + y2) / 2.0
+                    self.ax.plot([x1 - 0.5, x1 + 0.5], [y_mid, y_mid], 'k-', linewidth=3.0, zorder=3)
+                elif dy == 0 and abs(dx) == 1:
+                    # แนวเดียวกันแถว (ซ้าย-ขวา) -> กำแพงแนวตั้งที่กึ่งกลาง
+                    x_mid = (x1 + x2) / 2.0
+                    self.ax.plot([x_mid, x_mid], [y1 - 0.5, y1 + 0.5], 'k-', linewidth=3.0, zorder=3)
+
+            # วาดโหนดที่สำรวจแล้ว
+            if self.internal_map.graph:
+                explored_nodes = list(self.internal_map.explored)
+                if explored_nodes:
+                    ex, ey = zip(*explored_nodes)
+                    self.ax.scatter(ex, ey, s=50, c='lightblue', marker='s', zorder=2, label='Explored')
+
+            # วาดเส้นทางที่เดิน
+            if len(self.visited_path) > 1:
+                px, py = zip(*self.visited_path)
+                self.ax.plot(px, py, 'r-', linewidth=2, zorder=4, label='Path')
+
+            # วาดตำแหน่งปัจจุบัน
+            cx, cy = self.current_position
+            self.ax.scatter([cx], [cy], s=150, c='red', marker='o', zorder=5, label='Current')
+
+            # วาดจุดเริ่มต้น
+            if self.visited_path:
+                sx, sy = self.visited_path[0]
+                self.ax.scatter([sx], [sy], s=120, c='green', marker='o', zorder=5, label='Start')
+
+            self.ax.legend(loc='upper right', bbox_to_anchor=(1, 1))
+            
+            # อัปเดตแผนที่
+            plt.draw()
+            plt.pause(0.1)  # หน่วงเวลาเล็กน้อยให้เห็นการเปลี่ยนแปลง
+            
+        except Exception as e:
+            print(f"Error updating real-time plot: {e}")
+
+    def close_real_time_plot(self):
+        """ปิด real-time plotting"""
+        if self.real_time_plot and self.fig is not None:
+            try:
+                plt.ioff()  # ปิด interactive mode
+                plt.close(self.fig)
+                print("Real-time plotting closed")
+            except Exception as e:
+                print(f"Error closing real-time plot: {e}")
+
+    # ========================================================================
+    # Sensor Adjustment Functions
+    # ========================================================================
+    
+    def periodic_wall_clearance_adjust(self, target_clearance_m=0.175):
+        """
+        ปรับตำแหน่งหุ่นโดยใช้ข้อมูลจากเซ็นเซอร์ ToF และ IR
+        เพื่อให้อยู่ห่างจากกำแพงในระยะที่เหมาะสม
+        """
+        print("   Checking wall clearances using ToF and IR sensors...")
+        
+
+        # ToF หน้า
+        front_distance_mm = self.tof_handler.get_distance()
+
+        wall_left, wall_right, sharp_left_dist, sharp_right_dist = self._read_ir_sensors()
+        print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left_dist:.1f}mm, Right={sharp_right_dist:.1f}mm")
+        print(f"   Left={sharp_left_dist}, Right={sharp_right_dist}",wall_left,wall_right)
+        # ปรับตำแหน่งถ้าใกล้กำแพงหน้าเกินไป
+        if front_distance_mm < WALL_THRESHOLD_MM:
+            move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
+        if wall_left:
+            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m +0.03
+            print(f"left {-move_dist_m}")
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
+        elif wall_right:
+            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m +0.03
+            print(f"right {move_dist_m}")
+            if abs(move_dist_m) > 0.05:
+                self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
+
+    # ========================================================================
+    # Movement and PID Control Functions
+    # ========================================================================
+    
+    def move_forward_pid(self, distance_m, speed_limit=0.6):
+        """
+        ใช้ PID controller เพื่อเคลื่อนที่ไปข้างหน้าระยะทางที่กำหนด
+        
+        Args:
+            distance_m: ระยะทางที่ต้องการเดิน (เมตร)
+            speed_limit: ความเร็วสูงสุด (เมตร/วินาที)
+        """
+        print(f"   PID Move: Moving forward {distance_m}m.")
+        pid = PIDController(Kp=2, Ki=0.02, Kd=0.1, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
+        start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
+        # Execute motion in small, blocking steps to avoid overlapping actions
+        max_step = 0.6  # meters per step
+        while True:
+            # Obstacle check BEFORE issuing a new move action
+            if self.tof_handler.get_distance() <= 280:
+                
+                print("   PID Move: Obstacle detected by ToF (<=280mm). Aborting forward move.")
                 break
 
-    except KeyboardInterrupt:
-        print("\n[INFO] KeyboardInterrupt — stopping.")
-    except Exception:
-        print("\n[ERROR] Unhandled exception:", file=sys.stderr)
-        traceback.print_exc()
+            curr_x, curr_y, _, _, _, _ = self.pose_handler.get_pose()
+            dist_traveled = math.hypot(curr_x - start_x, curr_y - start_y)
+            print(dist_traveled)
+            remaining = distance_m - dist_traveled
+            if abs(remaining) < 0.1:
+                break
+
+            # Determine a safe step distance and speed
+            step = max(-max_step, min(max_step, remaining))
+            step_speed = min(speed_limit, max(0.6, abs(step) * 2))
+
+            action = self.ep_chassis.move(x=step, y=0, z=0, xy_speed=step_speed)
+            action.wait_for_completed()
+            self.ep_chassis.move(x=0, y=0, z=0, xy_speed=step_speed).wait_for_completed
+            time.sleep(0.01)
+        print("   PID Move: Completed.")
+
+        gx, gy = self.current_position
+        _, _, _, yaw, _, _ = self.pose_handler.get_pose()
+        self.path_log.append({
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "grid_x": gx, "grid_y": gy, "yaw": yaw
+        })
+
+    def turn_pid(self, target_angle, speed_limit=90):
+        """
+        ใช้ PID controller เพื่อหมุนไปยังมุมที่กำหนด
+        
+        Args:
+            target_angle: มุมเป้าหมาย (องศา)
+            speed_limit: ความเร็วการหมุนสูงสุด (องศา/วินาที)
+        """
+        print(f"   PID Turn: Turning to {target_angle} degrees.")
+        # Execute rotation in small, blocking steps to avoid overlapping actions
+        max_step_deg = 90  # degrees per step
+        while True:
+            _, _, _, current_yaw, _, _ = self.pose_handler.get_pose()
+            error = target_angle - current_yaw
+            if error > 180: error -= 360
+            if error < -180: error += 360
+            print(error,2)
+            if abs(error) < 1.5:
+                break
+            
+            # Use a clamped step rotation to the target
+            step_deg = max(-max_step_deg, min(max_step_deg, error))
+            step_speed = min(speed_limit, max(30, abs(step_deg) * 10))
+
+            action = self.ep_chassis.move(x=0, y=0, z=-step_deg, z_speed=step_speed)
+            action.wait_for_completed()
+            time.sleep(0.01)
+        self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+        time.sleep(0.5)
+        print("   PID Turn: Completed.")
+
+    def execute_path(self, path):
+        """
+        ดำเนินการเดินตามเส้นทางที่กำหนดด้วย PID control
+        
+        Args:
+            path: รายการของตำแหน่งที่ต้องเดิน [(x1,y1), (x2,y2), ...]
+        """
+        if not path or len(path) < 2: return
+        print(f"Executing path with PID: {path}")
+        self.ep_led.set_led(r=0, g=0, b=255)
+        for i in range(len(path) - 1):
+            if self.current_position in self.visited_for_check:
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
+                print(f"\nPosition {self.current_position} already explored. Skipping scan.")
+            self.visited_for_check.append(self.current_position)
+            start_node, end_node = path[i], path[i+1]
+            dx, dy = end_node[0] - start_node[0], end_node[1] - start_node[1]
+            target_orientation = -1
+            if dx == 0 and dy == 1: target_orientation = 0
+            elif dx == 1 and dy == 0: target_orientation = 1
+            elif dx == 0 and dy == -1: target_orientation = 2
+            elif dx == -1 and dy == 0: target_orientation = 3
+
+            target_angle = 0
+            if target_orientation == 1: target_angle = 90
+            elif target_orientation == 2: target_angle = 180
+            elif target_orientation == 3: target_angle = -90
+            self.detect_and_shot()
+            before_orientation = self.current_orientation
+            self.turn_pid(target_angle)
+            self.current_orientation = target_orientation
+            if before_orientation != self.current_orientation:
+                self.detect_and_shot()
+            time.sleep(0.2)
+            self.move_forward_pid(GRID_SIZE_M)
+            self.current_position = end_node
+            self.visited_path.append(self.current_position)
+    
+            self.pose_handler.set_xy(end_node[0] * GRID_SIZE_M, end_node[1] * GRID_SIZE_M)
+            self.pose_handler.set_yaw(target_angle)
+            time.sleep(0.2)
+            print("end++++++++++++++++++++++++++++++++++++++++++++++++++")
+
+    # ========================================================================
+    # Main Mission Control
+    # ========================================================================
+    
+    def run_mission(self):
+        """
+        ดำเนินการภารกิจหลัก:
+        1. สำรวจพื้นที่ทั้งหมด
+        2. แสดงแผนที่แบบ real-time
+        3. บันทึกข้อมูลเซ็นเซอร์และเส้นทาง
+        """
+        try:
+            self.ep_gimbal.moveto(yaw=0, pitch=0, yaw_speed=GIMBAL_TURN_SPEED).wait_for_completed()
+            
+            # เริ่มต้น real-time plotting
+            self.init_real_time_plot()
+            self.update_real_time_plot()  # แสดงแผนที่เริ่มต้น
+            """
+            รันการตรวจจับวัตถุด้วยกล้อง RoboMaster แบบสั้นๆ
+            
+            target_color: สีเป้าหมาย ('red', 'green', 'blue', 'yellow')
+            target_shape: รูปทรงเป้าหมาย
+                - 'circle': วงกลม
+                - 'square': สี่เหลี่ยมจัตุรัส  
+                - 'vertical_rectangle': สี่เหลี่ยมผืนผ้าแนวตั้ง
+                - 'horizontal_rectangle': สี่เหลี่ยมผืนผ้าแนวนอน
+            """
+            self.ep_camera.start_video_stream(display=False, resolution="720p")
+
+            self.set_target('green', 'square')
+            while True:
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
+                
+                if self.current_position not in self.internal_map.explored:
+                    previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
+                    self.scan_surroundings_with_gimbal(previous_position=previous_pos)
+                    # อัปเดตแผนที่หลังสแกน
+                    self.update_real_time_plot()
+
+                path_to_execute = self.decide_next_path()
+                if not path_to_execute:
+                    print(f"\n--- EXPLORATION COMPLETE! All areas explored ---")
+                    
+                    self.ep_led.set_led(r=0, g=255, b=0, effect="on")
+                    time.sleep(0.5)
+                    self.ep_camera.stop_video_stream()
+                    time.sleep(0.5)
+                    A=self.shoot_grid
+                    print(A)
+                    break
+                self.execute_path(path_to_execute)
+                # อัปเดตแผนที่หลังเคลื่อนที่
+                self.update_real_time_plot()
+        except Exception as e:
+                print(f"{e}")
+        finally:
+            self.save_targets_json()
+            self.save_map_state_json()
+            print(self.shoot_grid)
+            print("\n--- Final Marker Map ---")
+
+            # ปิด real-time plot และบันทึกแผนที่สุดท้าย
+            self.close_real_time_plot()
+            
+            self.plot_map_with_walls(filename="maze_map.png")
+
+            self.save_csv_logs()
+
+# ==============================================================================
+# Map Visualization Functions
+# ==============================================================================
+
+    def plot_map_with_walls(self, filename="maze_map.png"):
+        """วาดแผนที่สุดท้ายพร้อมกำแพง เส้นทาง และ markers โดยใช้สถานะภายในออบเจ็กต์"""
+        graph = self.internal_map.graph
+        blocked = self.internal_map.blocked
+        path = self.visited_path
+        width, height = self.border
+
+        plt.figure(figsize=(8, 8))
+        plt.title("Robot Map with Walls and Path")
+
+        # วาดเส้นทางเปิดจากกราฟ (หลีกเลี่ยงซ้ำขอบเดียวกัน)
+        drawn = set()
+        for a, nbs in graph.items():
+            for b in nbs:
+                edge = tuple(sorted([a, b]))
+                if edge in drawn:
+                    continue
+                drawn.add(edge)
+                x1, y1 = a
+                x2, y2 = b
+                plt.plot([x1, x2], [y1, y2], linewidth=1.2, alpha=0.5, zorder=1)
+
+        # วาดกำแพงจาก blocked edges
+        for (a, b) in sorted(blocked):
+            (x1, y1), (x2, y2) = a, b
+            dx, dy = x2 - x1, y2 - y1
+            if dx == 0 and abs(dy) == 1:
+                y_mid = (y1 + y2) / 2.0
+                plt.plot([x1 - 0.5, x1 + 0.5], [y_mid, y_mid], linewidth=3.0, color="k", zorder=3)
+            elif dy == 0 and abs(dx) == 1:
+                x_mid = (x1 + x2) / 2.0
+                plt.plot([x_mid, x_mid], [y1 - 0.5, y1 + 0.5], linewidth=3.0, color="k", zorder=3)
+
+        # วาดโหนด
+        if graph:
+            xs, ys = zip(*graph.keys())
+            plt.scatter(xs, ys, s=36, color="tab:blue", zorder=2, label="Nodes")
+
+        # วาดเส้นทางที่เดิน
+        if path:
+            px, py = zip(*path)
+            plt.plot(px, py, linewidth=2, color="tab:red", zorder=4, label="Path")
+            plt.scatter(px[0], py[0], s=120, color="green", marker='o', zorder=5, label='Start')
+            plt.scatter(px[-1], py[-1], s=120, color="purple", marker='X', zorder=5, label='End')
+
+        # วาด markers จาก shoot_grid (รองรับทั้งโครงสร้างเก่าและใหม่)
+        if self.shoot_grid:
+            blocked_edges = set(blocked)
+            markers_by_wall = {}
+
+            def add_marker(mx, my, text):
+                key = (mx, my)
+                markers_by_wall.setdefault(key, []).append(text)
+
+            def border_center(x, y, orientation):
+                if orientation == 0:   return (x, height - 0.5)   # North border
+                if orientation == 2:   return (x, -0.5)           # South border
+                if orientation == 1:   return (width - 0.5, y)    # East border
+                if orientation == 3:   return (-0.5, y)           # West border
+                return (x, y)
+
+            for entry in self.shoot_grid:
+                # โครงสร้างเก่า: (pos, orientation, color, shape)
+                if len(entry) == 4 and isinstance(entry[2], str):
+                    pos, orientation, color, shape = entry
+                    cs_iter = [(color, shape)]
+                # โครงสร้างใหม่: (pos, orientation, [(color,shape), ...])
+                elif len(entry) == 3 and isinstance(entry[2], list):
+                    pos, orientation, cs_iter = entry
+                else:
+                    continue
+
+                x, y = pos
+                # ทิศ -> เวกเตอร์การเดิน
+                if orientation == 0:
+                    dx, dy = 0, 1
+                elif orientation == 1:
+                    dx, dy = 1, 0
+                elif orientation == 2:
+                    dx, dy = 0, -1
+                else:
+                    dx, dy = -1, 0
+
+                cx, cy = x, y
+                mx = my = None
+                while True:
+                    nx, ny = cx + dx, cy + dy
+                    out_of_bounds = not (0 <= nx < width and 0 <= ny < height)
+                    if out_of_bounds:
+                        mx, my = border_center(cx, cy, orientation)
+                        break
+                    edge = tuple(sorted([(cx, cy), (nx, ny)]))
+                    if edge in blocked_edges:
+                        mx, my = (cx + nx) / 2.0, (cy + ny) / 2.0
+                        break
+                    cx, cy = nx, ny
+
+                if mx is None or my is None:
+                    continue
+
+                # Apply a small offset to move the star away from the wall/border for visibility
+                offset = 0.10
+                if orientation == 0:      # N → nudge slightly downward (into the cell)
+                    ox, oy = 0.0, -offset
+                elif orientation == 1:    # E → nudge slightly left
+                    ox, oy = -offset, 0.0
+                elif orientation == 2:    # S → nudge slightly upward
+                    ox, oy = 0.0, offset
+                else:                      # W → nudge slightly right
+                    ox, oy = offset, 0.0
+
+                mx_off, my_off = mx + ox, my + oy
+                for color, shape in cs_iter:
+                    add_marker(mx_off, my_off, f"{color} {shape}")
+
+            # วาด marker รวมบนผนังตำแหน่งเดียวกัน
+            for (mx, my), texts in markers_by_wall.items():
+                plt.scatter(mx, my, color='gold', s=180, marker='*', edgecolors='black', zorder=6)
+                # Place text just below the star marker for readability
+                plt.text(mx, my - 0.06, '\n'.join(texts), color='black', ha='center', va='top', fontsize=9, zorder=7)
+
+        plt.gca().set_aspect('equal', adjustable='box')
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc='best')
+        plt.savefig(filename, dpi=150)
+        print(f"Map saved to '{filename}'")
+        plt.close()
+
+
+
+
+if __name__ == '__main__':
+
+    # เชื่อมต่อหุ่นยนต์
+    print("Connecting to RoboMaster robot...")
+    ep_robot = robot.Robot()
+    ep_robot.initialize(conn_type="ap")
+    print("Robot connected successfully.")
+
+    # สร้าง data handlers สำหรับเซ็นเซอร์ต่างๆ
+    tof_handler = TofDataHandler()
+    gimbal_handler = GimbalDataHandler()
+    pose_handler = PoseDataHandler()
+
+    # สมัครรับข้อมูลจากเซ็นเซอร์
+    print("Setting up sensor subscriptions...")
+    ep_robot.sensor.sub_distance(freq=10, callback=tof_handler.update)
+    ep_robot.chassis.sub_position(freq=10, callback=pose_handler.update_position)
+    ep_robot.chassis.sub_attitude(freq=10, callback=pose_handler.update_attitude)
+    ep_robot.gimbal.sub_angle(freq=20, callback=gimbal_handler.update)
+    print("All sensor subscriptions completed.")
+
+
+    explorer = MazeExplorer(ep_robot, tof_handler, gimbal_handler, pose_handler)
+
+    explorer.start_continuous_logging(frequency_hz=10)
+
+    # รอให้ระบบเซ็นเซอร์เสถียร
+    time.sleep(2)
+    try:
+        explorer.run_mission()
+    except Exception as e:
+                print(f"{e}")
     finally:
         try:
-            if ep_camera is not None: ep_camera.stop_video_stream()
-        except Exception: pass
+            explorer.save_targets_json()
+            explorer.save_map_state_json()
+        except Exception as e:
+                print(f"{e}")
+    # การหยุดทำงานอย่างปลอดภัย
+
+    
+    if explorer:
+        explorer.stop_continuous_logging()
+        explorer.save_csv_logs()
+        explorer.close_real_time_plot()
+
+    if ep_robot:
+
         try:
-            if ep_gimbal is not None: ep_gimbal.unsub_angle()
-        except Exception: pass
-        try:
-            if ep_robot is not None: ep_robot.close()
-        except Exception: pass
-        cv2.destroyAllWindows()
+            ep_robot.sensor.unsub_distance()
+            ep_robot.gimbal.unsub_angle()
+            ep_robot.chassis.unsub_position()
+            ep_robot.chassis.unsub_attitude()
+            ep_robot.close()
+            print("Robot connection closed safely.")
+        except Exception as e:
+            print(f"Warning during robot cleanup: {e}")
+    
+    print("✅ Mission completed and cleanup finished.")
