@@ -36,8 +36,8 @@ from lab1_complete_mul import (
 CAMERA_HORIZONTAL_FOV = 109
 CAMERA_VERTICAL_FOV = 93
 # ====== ตั้งชื่อไฟล์ JSON (แก้ให้ตรงกับไฟล์ที่ได้จาก LAB 1) ======
-MAP_JSON_PATH = "map_state_run1_20251006_194731.json"
-TARGETS_JSON_PATH = "targets_run1_20251006_194731.json"
+MAP_JSON_PATH = "map_state_run1_20251006_212644.json"
+TARGETS_JSON_PATH = "targets_run1_20251006_212644.json"
 
 # ====== Utility: สร้างกราฟ/BFS จาก JSON ======
 def _graph_from_json(map_payload):

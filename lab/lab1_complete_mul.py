@@ -32,7 +32,7 @@ import threading
 import math
 import csv
 from datetime import datetime
-from collections import deque
+from collections import deque, defaultdict
 import json
 import os
 import sys
@@ -50,7 +50,7 @@ import numpy as np
 # =============================================================================
 
 # Robot Movement and Grid Settings
-GRID_SIZE_M = 0.6                   # ขนาดกริดเป็นเมตร
+GRID_SIZE_M = 0.6                # ขนาดกริดเป็นเมตร
 WALL_THRESHOLD_MM = 450                # เกณฑ์ระยะทางที่ถือว่ามีกำแพง (มม.)
 
 # Gimbal and Vision Settings
@@ -328,7 +328,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         self.count = True
         # Exploration settings
-        self.border = (3, 3)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (3, 5)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
         # Exploration settings
@@ -1206,70 +1206,81 @@ class MazeExplorer:
                 sx, sy = self.visited_path[0]
                 self.ax.scatter([sx], [sy], s=120, c='green', marker='o', zorder=5, label='Start')
 
-            # วาด object markers แบบเดียวกับ plot_map_with_walls
+            # วาด object markers โดยใช้หลักการเดียวกับ plot_map_with_walls และเรียก draw_marker
             if self.shoot_grid:
-                blocked_edges = set(self.internal_map.blocked)
+                blocked = self.internal_map.blocked
                 width, height = self.border
+                offset = 0.10
 
-                def border_center(x, y, orientation):
-                    if orientation == 0:   return (x, height - 0.5)   # ชนขอบบน
-                    if orientation == 2:   return (x, -0.5)           # ชนขอบล่าง
-                    if orientation == 1:   return (width - 0.5, y)    # ชนขอบขวา
-                    if orientation == 3:   return (-0.5, y)           # ชนขอบซ้าย
-                    return (x, y)
+                marker_list = []  # (mx,my,color,shape)
 
                 for entry in self.shoot_grid:
-                    # รองรับทั้งโครงสร้างเก่าและใหม่
+                    # รองรับทั้งโครงสร้างเก่า (pos,ori,color,shape) และใหม่ (pos,ori,[(c,s),...])
                     if len(entry) == 4 and isinstance(entry[2], str):
-                        pos, orientation, color, shape = entry
+                        (x, y), orientation, color, shape = entry
                         cs_iter = [(color, shape)]
                     elif len(entry) == 3 and isinstance(entry[2], list):
-                        pos, orientation, cs_iter = entry
+                        (x, y), orientation, cs_iter = entry
                     else:
                         continue
 
-                    x, y = pos
-                    if orientation == 0:
+                    # orientation -> dx, dy + offset สำหรับการเล็ก ๆ
+                    if orientation == 0:      # N
                         dx, dy = 0, 1
-                    elif orientation == 1:
+                        ox, oy = 0, -offset
+                    elif orientation == 1:    # E
                         dx, dy = 1, 0
-                    elif orientation == 2:
+                        ox, oy = -offset, 0
+                    elif orientation == 2:    # S
                         dx, dy = 0, -1
-                    else:
+                        ox, oy = 0, offset
+                    elif orientation == 3:    # W
                         dx, dy = -1, 0
+                        ox, oy = offset, 0
+                    else:
+                        dx, dy, ox, oy = 0, 1, 0, -offset
 
                     cx, cy = x, y
+                    max_steps = max(width, height)
+                    steps = 0
                     mx = my = None
-                    while True:
+                    while steps < max_steps:
                         nx, ny = cx + dx, cy + dy
-                        out_of_bounds = not (0 <= nx < width and 0 <= ny < height)
-                        if out_of_bounds:
-                            mx, my = border_center(cx, cy, orientation)
-                            break
-                        edge = tuple(sorted([(cx, cy), (nx, ny)]))
-                        if edge in blocked_edges:
-                            mx, my = (cx + nx) / 2.0, (cy + ny) / 2.0
+                        edge_normal = ((cx, cy), (nx, ny))
+                        edge_reversed = ((nx, ny), (cx, cy))
+                        # ชนกำแพงที่ขอบ edge ใดๆ
+                        if edge_normal in blocked or edge_reversed in blocked:
+                            mx = (cx + nx) / 2 + ox
+                            my = (cy + ny) / 2 + oy
                             break
                         cx, cy = nx, ny
-
+                        steps += 1
                     if mx is None or my is None:
-                        continue
-
-                    # นำ offset ตามทิศ เพื่อไม่ให้ดาวทับเส้นกำแพง
-                    offset = 0.10
-                    if orientation == 0:
-                        ox, oy = 0.0, -offset
-                    elif orientation == 1:
-                        ox, oy = -offset, 0.0
-                    elif orientation == 2:
-                        ox, oy = 0.0, offset
-                    else:
-                        ox, oy = offset, 0.0
-                    mx_off, my_off = mx + ox, my + oy
+                        # กำแพงไม่เจอ → วาง marker ที่ปลายสุดในขอบของแผนที่
+                        mx = cx + ox
+                        my = cy + oy
 
                     for color, shape in cs_iter:
-                        self.ax.scatter(mx_off, my_off, color='gold', s=180, marker='*', edgecolors='black', zorder=6)
-                        self.ax.text(mx_off, my_off - 0.06, f"{color} {shape}", color='black', ha='center', va='top', fontsize=9, zorder=7)
+                        marker_list.append((mx, my, color, shape))
+
+                # จัดเรียง marker หลายอันบนกำแพงเดียวกันด้วยการเยื้องตามแนวกำแพง
+                pos_counter = defaultdict(list)
+                for mx, my, color, shape in marker_list:
+                    key = (round(mx, 2), round(my, 2))
+                    pos_counter[key].append((color, shape))
+
+                for (mx, my), markers in pos_counter.items():
+                    n = len(markers)
+                    for i, (color, shape) in enumerate(markers):
+                        shift = (i - (n - 1) / 2) * 0.15
+                        # แนวกำแพง: x ครึ่งทศนิยม ~ 0 → แนวตั้ง, ไม่งั้นแนวนอน
+                        if abs(round(mx - int(mx), 2)) < 0.01:  # vertical wall
+                            draw_x = mx + shift
+                            draw_y = my
+                        else:  # horizontal wall
+                            draw_x = mx
+                            draw_y = my + shift
+                        self.draw_marker(self.ax, draw_x, draw_y, color, shape)
 
             self.ax.legend(loc='upper right', bbox_to_anchor=(1, 1))
             
@@ -1316,11 +1327,13 @@ class MazeExplorer:
             move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
+        time.sleep(0.01)
         if wall_left:
             move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m-0.02
             print(f"left {-move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
+        
         elif wall_right:
             move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m-0.02
             print(f"right {move_dist_m}")
@@ -1332,7 +1345,7 @@ class MazeExplorer:
     # Movement and PID Control Functions
     # ========================================================================
     
-    def move_forward_pid(self, distance_m, speed_limit=0.6):
+    def move_forward_pid(self, distance_m, speed_limit=1):
         """
         ใช้ PID controller เพื่อเคลื่อนที่ไปข้างหน้าระยะทางที่กำหนด
         
@@ -1341,10 +1354,8 @@ class MazeExplorer:
             speed_limit: ความเร็วสูงสุด (เมตร/วินาที)
         """
         print(f"   PID Move: Moving forward {distance_m}m.")
-        pid = PIDController(Kp=2, Ki=0.02, Kd=0.1, setpoint=distance_m, output_limits=(-speed_limit, speed_limit))
         start_x, start_y, _, _, _, _ = self.pose_handler.get_pose()
         # Execute motion in small, blocking steps to avoid overlapping actions
-        max_step = 0.6  # meters per step
         while True:
             # Obstacle check BEFORE issuing a new move action
             if self.tof_handler.get_distance() <= 280:
@@ -1358,15 +1369,10 @@ class MazeExplorer:
             remaining = distance_m - dist_traveled
             if abs(remaining) < 0.1:
                 break
-
-            # Determine a safe step distance and speed
-            step = max(-max_step, min(max_step, remaining))
-            step_speed = min(speed_limit, max(0.6, abs(step) * 2))
-
-            action = self.ep_chassis.move(x=step, y=0, z=0, xy_speed=step_speed)
-            action.wait_for_completed()
-            self.ep_chassis.move(x=0, y=0, z=0, xy_speed=step_speed).wait_for_completed
+            self.ep_chassis.move(x=remaining, y=0, z=0, xy_speed=speed_limit).wait_for_completed()
             time.sleep(0.01)
+        self.ep_chassis.move(x=0, y=0, z=0, xy_speed=speed_limit).wait_for_completed()
+        time.sleep(0.5)
         print("   PID Move: Completed.")
 
         gx, gy = self.current_position
@@ -1517,8 +1523,44 @@ class MazeExplorer:
 # Map Visualization Functions
 # ==============================================================================
 
+    def draw_marker(self,ax, draw_x, draw_y, color, shape, size=0.2):
+        """
+        วาด marker บน axes ax
+        shape: 'circle', 'square', 'vertical_rectangle', 'horizontal_rectangle'
+        เฉพาะ 'vertical_rectangle' และ 'horizontal_rectangle' จะแสดงคำย่อใต้ marker
+        """
+        
+        # วาด marker
+        if shape == 'circle':
+            ax.scatter(draw_x, draw_y, color=color, s=180, marker='o',
+                    edgecolors='black', zorder=6)
+        elif shape == 'square':
+            ax.scatter(draw_x, draw_y, color=color, s=180, marker='s',
+                    edgecolors='black', zorder=6)
+        elif shape in ['vertical_rectangle', 'horizontal_rectangle']:
+            # วาดเป็นดาวแทน
+            ax.scatter(draw_x, draw_y, color=color, s=220, marker='*',
+                    edgecolors='black', linewidths=1.2, zorder=7)
+            
+            # กำหนดคำย่อเฉพาะ
+            abbrev = 'VR' if shape == 'vertical_rectangle' else 'HR'
+            
+            # เขียนคำย่อใต้ marker
+            ax.text(draw_x, draw_y - 0.04, abbrev,
+                    fontsize=8, color='black', ha='center', va='top',
+                    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'),
+                    zorder=8)
+        else:
+            # รูปทรงอื่น ใช้ marker ปกติ
+            ax.scatter(draw_x, draw_y, color=color, s=180, marker='x',
+                    edgecolors='black', zorder=6)
+
+            
+            
     def plot_map_with_walls(self, filename="maze_map.png"):
-        """วาดแผนที่สุดท้ายพร้อมกำแพง เส้นทาง และ markers โดยใช้สถานะภายในออบเจ็กต์"""
+        """
+        วาดแผนที่สุดท้ายพร้อมกำแพง เส้นทาง และ markers โดยใช้สถานะภายในออบเจ็กต์
+        """
         graph = self.internal_map.graph
         blocked = self.internal_map.blocked
         path = self.visited_path
@@ -1527,7 +1569,9 @@ class MazeExplorer:
         plt.figure(figsize=(8, 8))
         plt.title("Robot Map with Walls and Path")
 
-        # วาดเส้นทางเปิดจากกราฟ (หลีกเลี่ยงซ้ำขอบเดียวกัน)
+                
+        # -------------------
+        # วาด edges ของ graph
         drawn = set()
         for a, nbs in graph.items():
             for b in nbs:
@@ -1539,9 +1583,10 @@ class MazeExplorer:
                 x2, y2 = b
                 plt.plot([x1, x2], [y1, y2], linewidth=1.2, alpha=0.5, zorder=1)
 
-        # วาดกำแพงจาก blocked edges
-        for (a, b) in sorted(blocked):
-            (x1, y1), (x2, y2) = a, b
+        # -------------------
+        # วาดกำแพง
+        for edge in blocked:
+            (x1, y1), (x2, y2) = edge
             dx, dy = x2 - x1, y2 - y1
             if dx == 0 and abs(dy) == 1:
                 y_mid = (y1 + y2) / 2.0
@@ -1550,94 +1595,97 @@ class MazeExplorer:
                 x_mid = (x1 + x2) / 2.0
                 plt.plot([x_mid, x_mid], [y1 - 0.5, y1 + 0.5], linewidth=3.0, color="k", zorder=3)
 
+        # -------------------
         # วาดโหนด
         if graph:
             xs, ys = zip(*graph.keys())
             plt.scatter(xs, ys, s=36, color="tab:blue", zorder=2, label="Nodes")
 
-        # วาดเส้นทางที่เดิน
+        # -------------------
+        # วาดเส้นทาง
         if path:
             px, py = zip(*path)
             plt.plot(px, py, linewidth=2, color="tab:red", zorder=4, label="Path")
             plt.scatter(px[0], py[0], s=120, color="green", marker='o', zorder=5, label='Start')
             plt.scatter(px[-1], py[-1], s=120, color="purple", marker='X', zorder=5, label='End')
 
-        # วาด markers จาก shoot_grid (รองรับทั้งโครงสร้างเก่าและใหม่)
+        # -------------------
         if self.shoot_grid:
-            blocked_edges = set(blocked)
-            markers_by_wall = {}
+            offset = 0.10  # ระยะขยับออกจากกำแพง
+            marker_list = []
 
-            def add_marker(mx, my, text):
-                key = (mx, my)
-                markers_by_wall.setdefault(key, []).append(text)
-
-            def border_center(x, y, orientation):
-                if orientation == 0:   return (x, height - 0.5)   # North border
-                if orientation == 2:   return (x, -0.5)           # South border
-                if orientation == 1:   return (width - 0.5, y)    # East border
-                if orientation == 3:   return (-0.5, y)           # West border
-                return (x, y)
-
+            # รองรับทั้งโครงสร้างเก่า (pos,ori,color,shape) และใหม่ (pos,ori,[(c,s),...])
             for entry in self.shoot_grid:
-                # โครงสร้างเก่า: (pos, orientation, color, shape)
                 if len(entry) == 4 and isinstance(entry[2], str):
-                    pos, orientation, color, shape = entry
+                    (x, y), orientation, color, shape = entry
                     cs_iter = [(color, shape)]
-                # โครงสร้างใหม่: (pos, orientation, [(color,shape), ...])
                 elif len(entry) == 3 and isinstance(entry[2], list):
-                    pos, orientation, cs_iter = entry
+                    (x, y), orientation, cs_iter = entry
                 else:
                     continue
 
-                x, y = pos
-                # ทิศ -> เวกเตอร์การเดิน
-                if orientation == 0:
+                # orientation -> dx, dy + offset สำหรับการเล็ก ๆ
+                if orientation == 0:      # N
                     dx, dy = 0, 1
-                elif orientation == 1:
+                    ox, oy = 0, -offset
+                elif orientation == 1:    # E
                     dx, dy = 1, 0
-                elif orientation == 2:
+                    ox, oy = -offset, 0
+                elif orientation == 2:    # S
                     dx, dy = 0, -1
-                else:
+                    ox, oy = 0, offset
+                elif orientation == 3:    # W
                     dx, dy = -1, 0
+                    ox, oy = offset, 0
+                else:
+                    dx, dy, ox, oy = 0, 1, 0, -offset
 
                 cx, cy = x, y
+                max_steps = max(width, height)  # ป้องกันเดินเกินแผนที่
+                steps = 0
                 mx = my = None
-                while True:
+                while steps < max_steps:
                     nx, ny = cx + dx, cy + dy
-                    out_of_bounds = not (0 <= nx < width and 0 <= ny < height)
-                    if out_of_bounds:
-                        mx, my = border_center(cx, cy, orientation)
+                    edge_normal = ((cx, cy), (nx, ny))
+                    edge_reversed = ((nx, ny), (cx, cy))
+                    # ชนกำแพงที่ขอบ edge ใดๆ
+                    if edge_normal in blocked or edge_reversed in blocked:
+                        mx = (cx + nx)/2 + ox
+                        my = (cy + ny)/2 + oy
                         break
-                    edge = tuple(sorted([(cx, cy), (nx, ny)]))
-                    if edge in blocked_edges:
-                        mx, my = (cx + nx) / 2.0, (cy + ny) / 2.0
-                        break
+                    # เดินต่อ
                     cx, cy = nx, ny
-
+                    steps += 1
                 if mx is None or my is None:
-                    continue
+                    # กำแพงไม่เจอ → วาง marker ที่ปลายสุดในขอบของแผนที่
+                    mx = cx + ox
+                    my = cy + oy
 
-                # Apply a small offset to move the star away from the wall/border for visibility
-                offset = 0.10
-                if orientation == 0:      # N → nudge slightly downward (into the cell)
-                    ox, oy = 0.0, -offset
-                elif orientation == 1:    # E → nudge slightly left
-                    ox, oy = -offset, 0.0
-                elif orientation == 2:    # S → nudge slightly upward
-                    ox, oy = 0.0, offset
-                else:                      # W → nudge slightly right
-                    ox, oy = offset, 0.0
-
-                mx_off, my_off = mx + ox, my + oy
+                # เพิ่ม marker ทั้งหมดใน cell นี้
                 for color, shape in cs_iter:
-                    add_marker(mx_off, my_off, f"{color} {shape}")
+                    marker_list.append((mx, my, color, shape))
 
-            # วาด marker รวมบนผนังตำแหน่งเดียวกัน
-            for (mx, my), texts in markers_by_wall.items():
-                plt.scatter(mx, my, color='gold', s=180, marker='*', edgecolors='black', zorder=6)
-                # Place text just below the star marker for readability
-                plt.text(mx, my - 0.06, '\n'.join(texts), color='black', ha='center', va='top', fontsize=9, zorder=7)
+            # จัดเรียง marker หลายอันบนกำแพงเดียวกันด้วยการเยื้อง
+            pos_counter = defaultdict(list)
+            for mx, my, color, shape in marker_list:
+                key = (round(mx, 2), round(my, 2))
+                pos_counter[key].append((color, shape))
 
+            for (mx, my), markers in pos_counter.items():
+                n = len(markers)
+                for i, (color, shape) in enumerate(markers):
+                    # symmetric offset along the wall
+                    shift = (i - (n - 1) / 2) * 0.15
+                    # แนวกำแพง: x ครึ่งทศนิยม ~ 0 → แนวตั้ง, ไม่งั้นแนวนอน
+                    if abs(round(mx - int(mx), 2)) < 0.01:  # vertical wall
+                        draw_x = mx + shift
+                        draw_y = my
+                    else:  # horizontal wall
+                        draw_x = mx
+                        draw_y = my + shift
+
+                    self.draw_marker(plt.gca(), draw_x, draw_y, color, shape)
+                
         plt.gca().set_aspect('equal', adjustable='box')
         plt.grid(True, alpha=0.3)
         plt.legend(loc='best')
