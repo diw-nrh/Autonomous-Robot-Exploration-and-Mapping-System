@@ -122,29 +122,29 @@ if __name__ == "__main__":
     ep.sensor.sub_distance(freq=10, callback=tof_cb)
 
     try:
-        # while True:
-        time.sleep(0.2)  # หน่วงเวลา 0.2s
-        # อ่านค่า ToF
-        with lock:
-            tof_val = latest_tof
-        # อ่านค่า ADC
-        sharp_left_adc = ep_adaptor.get_adc(id=1, port=2)   # Left sensor
-        sharp_right_adc = ep_adaptor.get_adc(id=2, port=1)  # Right sensor
+        while True:
+            time.sleep(0.2)  # หน่วงเวลา 0.2s
+            # อ่านค่า ToF
+            with lock:
+                tof_val = latest_tof
+            # อ่านค่า ADC
+            sharp_left_adc = ep_adaptor.get_adc(id=1, port=2)   # Left sensor
+            sharp_right_adc = ep_adaptor.get_adc(id=2, port=1)  # Right sensor
 
-        # อ่าค่า IR sensor I/O
-        ir_left = ep_adaptor.get_io(id=1, port=1)   # Left sensor
-        ir_right = ep_adaptor.get_io(id=2, port=2)  # Right sensor
-        # แปลงเป็น distance (mm)
-        distance_left = adc_to_distance_left(sharp_left_adc)
-        distance_right = adc_to_distance_right(sharp_right_adc)
+            # อ่าค่า IR sensor I/O
+            ir_left = ep_adaptor.get_io(id=1, port=1)   # Left sensor
+            ir_right = ep_adaptor.get_io(id=2, port=2)  # Right sensor
+            # แปลงเป็น distance (mm)
+            distance_left = adc_to_distance_left(sharp_left_adc)
+            distance_right = adc_to_distance_right(sharp_right_adc)
 
-        # แสดงผล
-        print(f"Left  - ADC: {sharp_left_adc:4d} → {distance_left:6.1f} mm")
-        print(f"Right - ADC: {sharp_right_adc:4d} → {distance_right:6.1f} mm")
-        print(f"IR Left: (IO: {ir_left})")
-        print(f"IR Right:(IO: {ir_right})")
-        print(f"[main] Latest ToF: {tof_val} cm ")
-        print("-" * 30)
+            # แสดงผล
+            print(f"Left  - ADC: {sharp_left_adc:4d} → {distance_left:6.1f} mm")
+            print(f"Right - ADC: {sharp_right_adc:4d} → {distance_right:6.1f} mm")
+            print(f"IR Left: (IO: {ir_left})")
+            print(f"IR Right:(IO: {ir_right})")
+            print(f"[main] Latest ToF: {tof_val} cm ")
+            print("-" * 30)
 
     except KeyboardInterrupt:
         try:

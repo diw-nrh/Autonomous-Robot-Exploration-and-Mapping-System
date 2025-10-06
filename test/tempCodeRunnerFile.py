@@ -1,2 +1,2 @@
 
-    ep_robot.close()
+            img_full = None

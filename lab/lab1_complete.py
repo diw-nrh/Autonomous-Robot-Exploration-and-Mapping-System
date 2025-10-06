@@ -442,8 +442,6 @@ class MazeExplorer:
                     peri = cv2.arcLength(cnt, True)
                     approx = cv2.approxPolyDP(cnt, 0.02 * max(1.0, peri), True)
                     v = len(approx)
-                    if v == 3:
-                        return 'triangle'
                     if v == 4:
                         x, y, wb, hb = cv2.boundingRect(cnt)
                         ar = float(wb) / max(1.0, hb)
@@ -583,8 +581,6 @@ class MazeExplorer:
                             circularity = 4 * np.pi * area / (perimeter * perimeter)
                             if circularity > 0.7:
                                 shape = 'circle'
-                        elif vertices == 3:
-                            shape = 'triangle'
                         elif vertices == 4:
                             # ใช้ bounding box เพื่อแยกประเภทสี่เหลี่ยม
                             x, y, w_box, h_box = cv2.boundingRect(cnt)
