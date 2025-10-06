@@ -327,7 +327,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         
         # Exploration settings
-        self.border = (5, 5)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (3, 3)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
         # Exploration settings
@@ -390,94 +390,61 @@ class MazeExplorer:
         """ตั้งค่าเป้าหมาย"""
         self.target_color = color
         self.target_shape = shape
+    # === Helpers: สี→mask, จัดประเภททรง, อัปเดต shoot_grid ===
+    def _build_mask(self, hsv_img, color_data):
+        """รองรับทั้งกรณีช่วงสีเดี่ยว และกรณีสีแดงแบบ 2 ช่วง"""
+        is_dual = (
+            isinstance(color_data, tuple)
+            and len(color_data) == 2
+            and all(isinstance(r, (list, tuple, np.ndarray)) and len(r) == 2 for r in color_data)
+        )
+        if is_dual:
+            (l1, u1), (l2, u2) = color_data
+            m1 = cv2.inRange(hsv_img, np.array(l1, np.uint8), np.array(u1, np.uint8))
+            m2 = cv2.inRange(hsv_img, np.array(l2, np.uint8), np.array(u2, np.uint8))
+            return cv2.bitwise_or(m1, m2)
+        lb = np.array(color_data[0], np.uint8)
+        ub = np.array(color_data[1], np.uint8)
+        return cv2.inRange(hsv_img, lb, ub)
 
-    def detect_and_shot(self):
-        """
-        Phase 1: สแกนทั้งภาพ เก็บวัตถุทั้งหมดของกริดปัจจุบันลง self.shoot_grid ในรูปแบบ
-                 (pos, orientation, [(color, shape), ...])
-        Phase 2: ถ้ามี (target_color, target_shape) ในรายการของกริดนี้ ค่อยเข้า loop หลักเล็ง/ยิง
-        """
+    def _classify_shape(self, cnt):
+        """คืนค่า: 'circle' | 'square' | 'horizontal_rectangle' | 'vertical_rectangle' | None"""
+        area = cv2.contourArea(cnt)
+        if area < 150:
+            return None
+        peri = cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, 0.02 * max(1.0, peri), True)
+        v = len(approx)
+        if v == 3:
+            return None  # ไม่ใช้สามเหลี่ยมในงานนี้
+        if v == 4:
+            x, y, wb, hb = cv2.boundingRect(cnt)
+            ar = float(wb) / max(1.0, hb)
+            if 0.85 <= ar <= 1.15:
+                return 'square'
+            elif ar > 1.15:
+                return 'horizontal_rectangle'
+            else:
+                return 'vertical_rectangle'
+        if v >= 8:
+            circ = 4.0 * np.pi * area / max(peri * peri, 1e-6)
+            if circ > 0.7:
+                return 'circle'
+        return None
 
-        # -------- Phase 1: Full-frame scan to populate shoot_grid --------
+    def _update_shoot_grid(self, pos, ori, detections, replace=True):
+        """
+        detections: list of (color, shape, (cx,cy))
+        เก็บเป็นรูปแบบใหม่: (pos, ori, [(color,shape), ...])
+        replace=True → เขียนทับผลเดิมของกริด/ทิศนั้นด้วยผลสแกนรอบนี้ (แม้จะว่าง)
+        """
+        
         if not isinstance(self.shoot_grid, list):
             self.shoot_grid = []
-
-        detections = []  # list[(user_color, shape, (cx,cy))]
-        try:
-            self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-            time.sleep(0.5)
-            img_full = self.ep_camera.read_cv2_image(strategy="newest", timeout=2)
-        except queue.Empty:
-            img_full = None
-
-        if img_full is not None:
-            blur_full = cv2.GaussianBlur(img_full, (5, 5), 0)
-            hsv_full = cv2.cvtColor(blur_full, cv2.COLOR_BGR2HSV)
-
-            def build_mask(hsv_img, color_data):
-                is_dual = (
-                    isinstance(color_data, tuple)
-                    and len(color_data) == 2
-                    and all(isinstance(r, (list, tuple, np.ndarray)) and len(r) == 2 for r in color_data)
-                )
-                if is_dual:
-                    (l1, u1), (l2, u2) = color_data
-                    m1 = cv2.inRange(hsv_img, np.array(l1, np.uint8), np.array(u1, np.uint8))
-                    m2 = cv2.inRange(hsv_img, np.array(l2, np.uint8), np.array(u2, np.uint8))
-                    return cv2.bitwise_or(m1, m2)
-                lb = np.array(color_data[0], np.uint8)
-                ub = np.array(color_data[1], np.uint8)
-                return cv2.inRange(hsv_img, lb, ub)
-
-            def classify_shape(cnt):
-                area = cv2.contourArea(cnt)
-                if area < 150:
-                    return None
-                peri = cv2.arcLength(cnt, True)
-                approx = cv2.approxPolyDP(cnt, 0.02 * max(1.0, peri), True)
-                v = len(approx)
-                if v == 3:
-                    return 'triangle'
-                if v == 4:
-                    x, y, wb, hb = cv2.boundingRect(cnt)
-                    ar = float(wb) / max(1.0, hb)
-                    if 0.85 <= ar <= 1.15:
-                        return 'square'
-                    elif ar > 1.15:
-                        return 'horizontal_rectangle'
-                    else:
-                        return 'vertical_rectangle'
-                if v >= 8:
-                    circ = 4.0 * np.pi * area / max(peri * peri, 1e-6)
-                    if circ > 0.7:
-                        return 'circle'
-                return None
-
-            reverse_color = {v: k for k, v in self.colors.items()} if hasattr(self, 'colors') else {}
-
-            for color_key, color_data in self.color_ranges.items():
-                mask = build_mask(hsv_full, color_data)
-                kernel = np.ones((3, 3), np.uint8)
-                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                for cnt in contours:
-                    shp = classify_shape(cnt)
-                    if not shp:
-                        continue
-                    x, y, wb, hb = cv2.boundingRect(cnt)
-                    cx, cy = x + wb // 2, y + hb // 2
-                    user_color = reverse_color.get(color_key, color_key)
-                    detections.append((user_color, shp, (cx, cy)))
-                
-
-        # --- merge เข้ารูปแบบใหม่ของ shoot_grid: (pos, ori, [(color,shape), ...]) ---
-        pos = self.current_position
-        ori = self.current_orientation
         entry_idx = None
         for i, entry in enumerate(self.shoot_grid):
-            if len(entry) == 4:
-                # migrate เก่า -> ใหม่
+            # migrate โครงเก่า → ใหม่
+            if len(entry) == 4 and isinstance(entry[2], str):
                 p, o, c_old, s_old = entry
                 self.shoot_grid[i] = (p, o, [(c_old, s_old)])
                 entry = self.shoot_grid[i]
@@ -489,358 +456,201 @@ class MazeExplorer:
             entry_idx = len(self.shoot_grid) - 1
 
         p, o, cs_list = self.shoot_grid[entry_idx]
-        # ไม่ dedupe ด้วย set อีกต่อไป เพื่อให้เก็บ "หลายอันชนิดเดียวกัน" ได้
-        for c, s, _center in detections:
-            cs_list.append((c, s))
-        self.shoot_grid[entry_idx] = (p, o, cs_list)
-
-        # gate เข้า Phase 2 เฉพาะเมื่อมีคู่เป้าหมายอย่างน้อยหนึ่งตัว
-        if (self.target_color, self.target_shape) not in cs_list:
-            print(f"⚠️ ไม่พบ {self.target_color}-{self.target_shape} ในกริด {pos} ori={ori}; ข้ามการเล็งยิง")
-            return None
-        print(self.shoot_grid)
-        # -------- Phase 2: Original aim and fire loop --------
-        pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
-        pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
-        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-        tof_dist = self.tof_handler.get_distance()
-<<<<<<< HEAD
-        if tof_dist < 1000 and tof_dist > 300:
-            # -------- Phase 1: Full-frame scan to populate shoot_grid --------
-            if not isinstance(self.shoot_grid, list):
-                self.shoot_grid = []
-
-            detections = []  # list[(user_color, shape, (cx,cy))]
-            try:
-                self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-                time.sleep(0.5)
-                img_full = self.ep_camera.read_cv2_image(strategy="newest", timeout=2)
-            except queue.Empty:
-                img_full = None
-
-            if img_full is not None:
-                blur_full = cv2.GaussianBlur(img_full, (5, 5), 0)
-                hsv_full = cv2.cvtColor(blur_full, cv2.COLOR_BGR2HSV)
-
-                def build_mask(hsv_img, color_data):
-                    is_dual = (
-                        isinstance(color_data, tuple)
-                        and len(color_data) == 2
-                        and all(isinstance(r, (list, tuple, np.ndarray)) and len(r) == 2 for r in color_data)
-                    )
-                    if is_dual:
-                        (l1, u1), (l2, u2) = color_data
-                        m1 = cv2.inRange(hsv_img, np.array(l1, np.uint8), np.array(u1, np.uint8))
-                        m2 = cv2.inRange(hsv_img, np.array(l2, np.uint8), np.array(u2, np.uint8))
-                        return cv2.bitwise_or(m1, m2)
-                    lb = np.array(color_data[0], np.uint8)
-                    ub = np.array(color_data[1], np.uint8)
-                    return cv2.inRange(hsv_img, lb, ub)
-
-                def classify_shape(cnt):
-                    area = cv2.contourArea(cnt)
-                    if area < 150:
-                        return None
-                    peri = cv2.arcLength(cnt, True)
-                    approx = cv2.approxPolyDP(cnt, 0.02 * max(1.0, peri), True)
-                    v = len(approx)
-                    if v == 4:
-                        x, y, wb, hb = cv2.boundingRect(cnt)
-                        ar = float(wb) / max(1.0, hb)
-                        if 0.85 <= ar <= 1.15:
-                            return 'square'
-                        elif ar > 1.15:
-                            return 'horizontal_rectangle'
-                        else:
-                            return 'vertical_rectangle'
-                    if v >= 8:
-                        circ = 4.0 * np.pi * area / max(peri * peri, 1e-6)
-                        if circ > 0.7:
-                            return 'circle'
-                    return None
-
-                reverse_color = {v: k for k, v in self.colors.items()} if hasattr(self, 'colors') else {}
-
-                for color_key, color_data in self.color_ranges.items():
-                    mask = build_mask(hsv_full, color_data)
-                    kernel = np.ones((3, 3), np.uint8)
-                    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-                    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    for cnt in contours:
-                        shp = classify_shape(cnt)
-                        if not shp:
-                            continue
-                        x, y, wb, hb = cv2.boundingRect(cnt)
-                        cx, cy = x + wb // 2, y + hb // 2
-                        user_color = reverse_color.get(color_key, color_key)
-                        detections.append((user_color, shp, (cx, cy)))
-                    
-
-            # --- merge เข้ารูปแบบใหม่ของ shoot_grid: (pos, ori, [(color,shape), ...]) ---
-            pos = self.current_position
-            ori = self.current_orientation
-            entry_idx = None
-            for i, entry in enumerate(self.shoot_grid):
-                if len(entry) == 4:
-                    # migrate เก่า -> ใหม่
-                    p, o, c_old, s_old = entry
-                    self.shoot_grid[i] = (p, o, [(c_old, s_old)])
-                    entry = self.shoot_grid[i]
-                if len(entry) == 3 and entry[0] == pos and entry[1] == ori:
-                    entry_idx = i
-                    break
-            if entry_idx is None:
-                self.shoot_grid.append((pos, ori, []))
-                entry_idx = len(self.shoot_grid) - 1
-
-            p, o, cs_list = self.shoot_grid[entry_idx]
-            # ไม่ dedupe ด้วย set อีกต่อไป เพื่อให้เก็บ "หลายอันชนิดเดียวกัน" ได้
+        print(1,cs_list)
+        if replace:
+            # ใช้ผลสแกน “รอบนี้เท่านั้น”
+            cs_list = [(c, s) for (c, s, _center) in detections]
+        else:
+            # สะสม (โหมดเดิม)
             for c, s, _center in detections:
                 cs_list.append((c, s))
-            self.shoot_grid[entry_idx] = (p, o, cs_list)
+        print(2,cs_list)
+        self.shoot_grid[entry_idx] = (p, o, cs_list)
+        return cs_list  # คืนรายการ (color,shape) ของกริดนี้
+    def _save_detection_snapshot(self, img_bgr, boxes_abs, labels, out_dir="snapshots", tag="phase1", roi_rect=None):
+        """
+        บันทึกภาพเต็ม พร้อมกรอบวัตถุ (boxes_abs ในพิกัดเต็มภาพ) และกรอบ ROI (ถ้ามี)
+        """
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            vis = img_bgr.copy()
 
-            # gate เข้า Phase 2 เฉพาะเมื่อมีคู่เป้าหมายอย่างน้อยหนึ่งตัว
-            if (self.target_color, self.target_shape) not in cs_list:
-                print(f"⚠️ ไม่พบ {self.target_color}-{self.target_shape} ในกริด {pos} ori={ori}; ข้ามการเล็งยิง")
-                return None
-            print(self.shoot_grid)
-            # -------- Phase 2: Original aim and fire loop --------
+            # วาดกรอบ ROI (ถ้ามี)
+            if roi_rect is not None:
+                rx, ry, rw, rh = roi_rect
+                cv2.rectangle(vis, (rx, ry), (rx + rw, ry + rh), (0, 255, 255), 2)
+                cv2.putText(vis, "ROI", (rx, max(0, ry - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            # วาดกรอบวัตถุ
+            for (bx, by, bw, bh), text in zip(boxes_abs, labels):
+                cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), (0, 255, 0), 2)
+                cv2.putText(vis, text, (bx, max(0, by - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            gx, gy = self.current_position
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            fname = f"{out_dir}/snap_{tag}_g{gx}_{gy}_o{self.current_orientation}_{ts}.png"
+            cv2.imwrite(fname, vis)
+            print(f"[SNAPSHOT] saved → {fname}")
+        except Exception as e:
+            print(f"[SNAPSHOT] error: {e}")
             
-            self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
-            center_x = center_y = None
-            err_x = err_y = 0.0
-            yaw_cmd = pitch_cmd = 0.0
-            have_object = False  # เพิ่มการประกาศตัวแปร
+    def scan_objects_fullframe(self, store=True, save_snapshot=True):
+        """
+        สแกนภาพเต็มเฟรม 1 ช็อต → คืน list[(user_color, shape, (cx,cy))]
+        ถ้า store=True จะอัปเดต self.shoot_grid ของ (pos, ori) ปัจจุบันด้วย
+        ถ้า save_snapshot=True จะบันทึกภาพพร้อมกรอบ
+        """
+        # ลอง recenter ให้ภาพอยู่มุมกลางก่อนสแกน (กันค้าง)
+        self.ep_gimbal.moveto(pitch=-5, yaw=0, pitch_speed=120).wait_for_completed()
+        img_full = None
+        for _ in range(4):
+            img_full = self.ep_camera.read_cv2_image(strategy="newest")
             time.sleep(0.5)
-            timebefore = time.monotonic()
-            while True:
-                    try:
-                        img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
-                        if img is None:
-                            continue
-                    except queue.Empty:
+        detections = []
+        boxes_abs = []
+        labels = []
+        roi_rect = None  # <— เตรียมไว้ส่งให้ snapshot
+        if img_full is not None:
+            h, w = img_full.shape[:2]
+            roi_w, roi_h = min(550, w), min(300, h)
+            roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
+            roi_rect = (roi_x, roi_y, roi_w, roi_h)  # <— เก็บพิกัด ROI (absolute)
+            roi = img_full[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+            blur_full = cv2.GaussianBlur(roi, (5, 5), 0)
+            hsv_full = cv2.cvtColor(blur_full, cv2.COLOR_BGR2HSV)
+
+            reverse_color = {v: k for k, v in self.colors.items()} if hasattr(self, 'colors') else {}
+
+            for color_key, color_data in self.color_ranges.items():
+                mask = self._build_mask(hsv_full, color_data)
+                kernel = np.ones((3, 3), np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    shp = self._classify_shape(cnt)
+                    if not shp:
                         continue
-                    # แปลงชื่อสีเก่าเป็นใหม่ (ถ้าจำเป็น)
-                    color_key = self.target_color
-                    if self.target_color in self.colors:
-                        color_key = self.colors[self.target_color]
-                    
-                    # ตรวจสอบว่ามีสีที่ต้องการหรือไม่
-                    if color_key not in self.color_ranges:
-                        print(f"⚠️ ไม่พบสี '{self.target_color}' ในระบบ")
-                        return []
-                    # ROI (กลางภาพ)
-                    h, w = img.shape[:2]
-                    roi_w, roi_h = min(800, w), min(450, h)
-                    roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
-                    roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
-                    
-                    # แปลง HSV และสร้าง mask (เพิ่มการเบลอ + morphology เพื่อลด noise)
-                    blur = cv2.GaussianBlur(roi, (5, 5), 0)
-                    hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-                    color_data = self.color_ranges[color_key]
-                    
-                    # สร้าง mask จากช่วงสี (รองรับกรณีแดง 2 ช่วง)
-                    is_dual_range = (
-                        isinstance(color_data, tuple)
-                        and len(color_data) == 2
-                        and all(
-                            isinstance(r, (list, tuple, np.ndarray)) and len(r) == 2
-                            for r in color_data
-                        )
-                    )
-                    if is_dual_range:
-                        (lower1, upper1), (lower2, upper2) = color_data
-                        mask1 = cv2.inRange(hsv, np.array(lower1, dtype=np.uint8), np.array(upper1, dtype=np.uint8))
-                        mask2 = cv2.inRange(hsv, np.array(lower2, dtype=np.uint8), np.array(upper2, dtype=np.uint8))
-                        mask = cv2.bitwise_or(mask1, mask2)
-                    else:
-                        lower_bound = np.array(color_data[0], dtype=np.uint8)
-                        upper_bound = np.array(color_data[1], dtype=np.uint8)
-                        mask = cv2.inRange(hsv, lower_bound, upper_bound)
+                    x, y, wb, hb = cv2.boundingRect(cnt)
+                    # ศูนย์กลางในพิกัด ROI
+                    cx, cy = x + wb // 2, y + hb // 2
+                    # แปลงเป็นพิกัดเต็มภาพ
+                    abs_x, abs_y = roi_x + x, roi_y + y
+                    user_color = reverse_color.get(color_key, color_key)  # 'brown_red' → 'red'
+                    detections.append((user_color, shp, (roi_x + cx, roi_y + cy)))
+                    boxes_abs.append((abs_x, abs_y, wb, hb))
+                    labels.append(f"{user_color} {shp}")
 
+        print(detections)
+        if store:
+            pos = self.current_position
+            ori = self.current_orientation
+            cs_list = self._update_shoot_grid(pos, ori, detections, replace=True)
+            print(f"[SCAN] pos={pos} ori={ori} → {cs_list}")
 
+        if save_snapshot and img_full is not None:
+            self._save_detection_snapshot(
+                img_full, boxes_abs, labels,
+                out_dir="snapshots", tag="phase1", roi_rect=roi_rect
+            )
 
-                    kernel = np.ones((5, 5), np.uint8)
-                    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-                    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-                    # หา contours
-                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    for cnt in contours:
-                        
-                        if cv2.contourArea(cnt) < 200:
-                            continue
-                        
-                        # ตรวจจับรูปทรง
-                        perimeter = cv2.arcLength(cnt, True)
-                        approx = cv2.approxPolyDP(cnt, 0.02 * perimeter, True)
-                        vertices = len(approx)
-                        
-                        shape = None
-                        if vertices >= 8:
-                            area = cv2.contourArea(cnt)
-                            circularity = 4 * np.pi * area / (perimeter * perimeter)
-                            if circularity > 0.7:
-                                shape = 'circle'
-                        elif vertices == 4:
-                            # ใช้ bounding box เพื่อแยกประเภทสี่เหลี่ยม
-                            x, y, w_box, h_box = cv2.boundingRect(cnt)
-                            aspect_ratio = float(w_box) / h_box
-                            
-                            if 0.9 <= aspect_ratio <= 1.1:
-                                shape = 'square'  # สี่เหลี่ยมจัตุรัส
-                            elif aspect_ratio > 1.3:
-                                shape = 'horizontal_rectangle'  # สี่เหลี่ยมผืนผ้าแนวนอน (กว้างมากกว่าสูง)
-                            elif aspect_ratio < 0.7:
-                                shape = 'vertical_rectangle'  # สี่เหลี่ยมผืนผ้าแนวตั้ง (สูงมากกว่ากว้าง)
-                            else:
-                                shape = 'rectangle'  # สี่เหลี่ยมทั่วไป
-                        
-                        if shape == self.target_shape:
-                            x, y, w_box, h_box = cv2.boundingRect(cnt)
-                            center_x = roi_x + x + w_box // 2
-                            center_y = roi_y + y + h_box // 2
-                            break  # เจอแล้วออกจาก loop
+        return detections
 
-                    # วาดกรอบและข้อความ (ถ้าเจอวัตถุ)
-                    if center_x is not None and center_y is not None:
-                        cv2.rectangle(img, (center_x-15, center_y-15), (center_x+30, center_y+30), (0, 255, 0), 2)
-                        cv2.putText(img, f"{self.target_shape}", (center_x-40, center_y-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    def detect_and_shot(self):
+        """
+        Phase 2: เล็ง/ยิง เฉพาะเมื่อ (target_color, target_shape) มีอยู่ในกริดปัจจุบัน
+        """
+        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+        tof_dist = self.tof_handler.get_distance()
+        if 300 < tof_dist < 1000:
+            # Phase 1 (บันทึกภาพด้วย)
+            detections = self.scan_objects_fullframe(store=True, save_snapshot=True)
+            time.sleep(0.5)
+            pairs = [(c, s) for (c, s, _center) in detections]
+            pos, ori = self.current_position, self.current_orientation
+            print(pairs)
+            print((self.target_color, self.target_shape) not in pairs)
+            if (self.target_color, self.target_shape) not in pairs:
+                print(f"⚠️ ไม่พบ {self.target_color}-{self.target_shape} ที่ {pos} ori={ori}; ข้ามการเล็งยิง")
+                return None
 
-=======
-        self.ep_gimbal.move(pitch=-15, yaw=0).wait_for_completed()
-        center_x = center_y = None
-        err_x = err_y = 0.0
-        yaw_cmd = pitch_cmd = 0.0
-        have_object = False  # เพิ่มการประกาศตัวแปร
-        time.sleep(0.5)
-        timebefore = time.monotonic()
-        while True:
+            # 3) เริ่มเล็ง/ยิง (ของเดิม) — ย่อให้เหลือแก่น
+            pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
+            pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
+            try:
+                self.ep_gimbal.moveto(pitch=-5, yaw=0, pitch_speed=120).wait_for_completed()
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+            center_x = center_y = None
+            timebefore = time.monotonic()
+            self.last_time = time.monotonic()
+
+            while True:
                 try:
-                    img = self.ep_camera.read_cv2_image(strategy="newest", timeout=1)
+                    img = self.ep_camera.read_cv2_image(strategy="newest", timeout=3)
                     if img is None:
                         continue
                 except queue.Empty:
                     continue
-                # แปลงชื่อสีเก่าเป็นใหม่ (ถ้าจำเป็น)
-                color_key = self.target_color
-                if self.target_color in self.colors:
-                    color_key = self.colors[self.target_color]
->>>>>>> 62d7710ab414ca1a0a99a47e6ecf935de2265ddd
-                
-                # ตรวจสอบว่ามีสีที่ต้องการหรือไม่
+
+                color_key = self.colors.get(self.target_color, self.target_color)
                 if color_key not in self.color_ranges:
                     print(f"⚠️ ไม่พบสี '{self.target_color}' ในระบบ")
                     return []
-                # ROI (กลางภาพ)
+
+                # ROI กลางภาพ
                 h, w = img.shape[:2]
-                roi_w, roi_h = min(800, w), min(450, h)
+                roi_w, roi_h = min(550, w), min(300, h)
                 roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
                 roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
-                
-                # แปลง HSV และสร้าง mask (เพิ่มการเบลอ + morphology เพื่อลด noise)
+
                 blur = cv2.GaussianBlur(roi, (5, 5), 0)
                 hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-                color_data = self.color_ranges[color_key]
-                
-                # สร้าง mask จากช่วงสี (รองรับกรณีแดง 2 ช่วง)
-                is_dual_range = (
-                    isinstance(color_data, tuple)
-                    and len(color_data) == 2
-                    and all(
-                        isinstance(r, (list, tuple, np.ndarray)) and len(r) == 2
-                        for r in color_data
-                    )
-                )
-                if is_dual_range:
-                    (lower1, upper1), (lower2, upper2) = color_data
-                    mask1 = cv2.inRange(hsv, np.array(lower1, dtype=np.uint8), np.array(upper1, dtype=np.uint8))
-                    mask2 = cv2.inRange(hsv, np.array(lower2, dtype=np.uint8), np.array(upper2, dtype=np.uint8))
-                    mask = cv2.bitwise_or(mask1, mask2)
-                else:
-                    lower_bound = np.array(color_data[0], dtype=np.uint8)
-                    upper_bound = np.array(color_data[1], dtype=np.uint8)
-                    mask = cv2.inRange(hsv, lower_bound, upper_bound)
-
-
-
+                mask = self._build_mask(hsv, self.color_ranges[color_key])
                 kernel = np.ones((5, 5), np.uint8)
                 mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
                 mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-                # หา contours
+
                 contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                target_found = False
                 for cnt in contours:
-                    
                     if cv2.contourArea(cnt) < 200:
                         continue
-                    
-                    # ตรวจจับรูปทรง
-                    perimeter = cv2.arcLength(cnt, True)
-                    approx = cv2.approxPolyDP(cnt, 0.02 * perimeter, True)
-                    vertices = len(approx)
-                    
-                    shape = None
-                    if vertices >= 8:
-                        area = cv2.contourArea(cnt)
-                        circularity = 4 * np.pi * area / (perimeter * perimeter)
-                        if circularity > 0.7:
-                            shape = 'circle'
-                    elif vertices == 3:
-                        shape = 'triangle'
-                    elif vertices == 4:
-                        # ใช้ bounding box เพื่อแยกประเภทสี่เหลี่ยม
-                        x, y, w_box, h_box = cv2.boundingRect(cnt)
-                        aspect_ratio = float(w_box) / h_box
-                        
-                        if 0.9 <= aspect_ratio <= 1.1:
-                            shape = 'square'  # สี่เหลี่ยมจัตุรัส
-                        elif aspect_ratio > 1.3:
-                            shape = 'horizontal_rectangle'  # สี่เหลี่ยมผืนผ้าแนวนอน (กว้างมากกว่าสูง)
-                        elif aspect_ratio < 0.7:
-                            shape = 'vertical_rectangle'  # สี่เหลี่ยมผืนผ้าแนวตั้ง (สูงมากกว่ากว้าง)
-                        else:
-                            shape = 'rectangle'  # สี่เหลี่ยมทั่วไป
-                    
+                    shape = self._classify_shape(cnt)
                     if shape == self.target_shape:
-                        x, y, w_box, h_box = cv2.boundingRect(cnt)
-                        center_x = roi_x + x + w_box // 2
-                        center_y = roi_y + y + h_box // 2
-                        break  # เจอแล้วออกจาก loop
+                        x, y, wb, hb = cv2.boundingRect(cnt)
+                        center_x = roi_x + x + wb // 2
+                        center_y = roi_y + y + hb // 2
+                        target_found = True
+                        break
 
-                # วาดกรอบและข้อความ (ถ้าเจอวัตถุ)
-                if center_x is not None and center_y is not None:
-                    cv2.rectangle(img, (center_x-15, center_y-15), (center_x+30, center_y+30), (0, 255, 0), 2)
-                    cv2.putText(img, f"{self.target_shape}", (center_x-40, center_y-40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-            
-                # แสดงข้อมูล
-                cv2.putText(img, f"Detecting: {self.target_color} {self.target_shape}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(img, f"Found: {1 if center_x is not None and center_y is not None else 0} objects", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(img, "Press 'q' to quit", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                
-                cv2.imshow("RoboMaster Detection", img)
-                # แสดงหน้าต่าง mask เพื่อ debug สี (ช่วยหาช่วง HSV)
+                # แสดงหน้าต่างเพื่อดีบัก (ถ้าต้องการคงไว้)
                 try:
+                    cv2.imshow("RoboMaster Detection", img)
                     cv2.imshow("Mask", mask)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        print("🔴 User pressed 'q' - exiting detection")
+                        break
                 except Exception:
                     pass
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    print("🔴 User pressed 'q' - exiting detection")
-                    break
-                
+
                 now = time.monotonic()
                 dt = now - self.last_time
                 self.last_time = now
-                camera_w = 1280//2
-                camera_h = 720//2
-                if center_x is not None and center_y is not None and tof_dist < 1000 and tof_dist>300:
-                    have_object = True
+
+                camera_w = 1280 // 2
+                camera_h = 720 // 2
+
+                if target_found:
                     err_x = (center_x - camera_w)
                     err_y = (center_y - camera_h)
                     yaw_cmd = pid_yaw.step(err_x, dt)
                     pitch_cmd = pid_pitch.step(err_y, dt)
-                    if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05 :
+                    if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05:
                         try:
                             self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
                         except Exception:
@@ -849,40 +659,37 @@ class MazeExplorer:
                             except Exception:
                                 pass
                     else:
-                        # เป้าอยู่ตรงกลางแล้ว - ยิงและออก
                         print("🎯 Target centered - firing and exiting")
                         self.ep_blaster.fire(times=3)
-                        time.sleep(1)
+                        time.sleep(0.8)
                         self.ep_blaster.fire(times=3)
-                        time.sleep(1)
+                        time.sleep(0.8)
                         self.ep_blaster.fire(times=3)
-                        time.sleep(1)
-                        self.record_target_hit(self.target_color, self.target_shape)  # recorded
-                        self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
-                        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-                        cv2.destroyAllWindows()
-                        # no legacy append to shoot_grid here; Phase 1 already stored entries
+                        time.sleep(0.6)
+                        self.record_target_hit(self.target_color, self.target_shape)
+                        try:
+                            self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
+                            self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+                        except Exception:
+                            pass
+                        try:
+                            cv2.destroyAllWindows()
+                        except Exception:
+                            pass
                         break
 
-                elif center_x is None and center_y is None and time.monotonic() - timebefore < 10.0 and have_object and tof_dist < 1000 and tof_dist > 300:
-                    self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
-                    pid_yaw.integ *= 0.9
-                    pid_pitch.integ *= 0.9
-                elif center_x is None and center_y is None and time.monotonic() - timebefore > 3.0 and not have_object and tof_dist < 1000 and tof_dist > 300:
-                    self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-                    cv2.destroyAllWindows()
+                elif time.monotonic() - timebefore > 10.0:
+                    # กันวนค้างนานเกินถ้าไม่เจอ
+                    try:
+                        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
+                        cv2.destroyAllWindows()
+                    except Exception:
+                        pass
                     break
-                elif time.monotonic() - timebefore > 10.0 and have_object and tof_dist < 1000 and tof_dist > 300:
-                    self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-                    cv2.destroyAllWindows()
-                    break
-                elif tof_dist > 1000 or tof_dist < 300:
-                    self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-                    cv2.destroyAllWindows()
-                    break
-                # รีเซ็ต center_x, center_y สำหรับ frame ถัดไป
+
                 center_x = center_y = None
-        # end detect_and_shot
+
+            # end detect_and_shot
     # -------------------- Continuous Sensor Logging (NEW) --------------------
     def _continuous_log_worker(self, frequency_hz=10):
         print(f"[Logging Thread] Started. Logging at {frequency_hz} Hz.")
@@ -1105,7 +912,7 @@ class MazeExplorer:
         self.internal_map.mark_explored(self.current_position)
         
         wall_distances = {}
-        self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
+        self.periodic_wall_clearance_adjust(target_clearance_m=0.16)
         direction_to_skip = -1
         if previous_position:
             print(f"   -> Path from {previous_position} is known. Adding connection automatically.")
@@ -1454,15 +1261,16 @@ class MazeExplorer:
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
         if wall_left:
-            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m +0.03
+            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m -0.02
             print(f"left {-move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
         elif wall_right:
-            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m +0.03
+            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m -0.02
             print(f"right {move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
+        self.ep_chassis.move(x=0, y=0, z=0, xy_speed=0.5).wait_for_completed()
 
     # ========================================================================
     # Movement and PID Control Functions
@@ -1554,9 +1362,7 @@ class MazeExplorer:
         print(f"Executing path with PID: {path}")
         self.ep_led.set_led(r=0, g=0, b=255)
         for i in range(len(path) - 1):
-            if self.current_position in self.visited_for_check:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
-                print(f"\nPosition {self.current_position} already explored. Skipping scan.")
+            self.periodic_wall_clearance_adjust(target_clearance_m=0.16)
             self.visited_for_check.append(self.current_position)
             start_node, end_node = path[i], path[i+1]
             dx, dy = end_node[0] - start_node[0], end_node[1] - start_node[1]
@@ -1575,6 +1381,7 @@ class MazeExplorer:
             self.turn_pid(target_angle)
             self.current_orientation = target_orientation
             if before_orientation != self.current_orientation:
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.16)
                 self.detect_and_shot()
             time.sleep(0.2)
             self.move_forward_pid(GRID_SIZE_M)
@@ -1615,9 +1422,8 @@ class MazeExplorer:
             """
             self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-            self.set_target('green', 'vertical_rectangle')
+            self.set_target('red', 'horizontal_rectangle')
             while True:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.23)
                 
                 if self.current_position not in self.internal_map.explored:
                     previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
