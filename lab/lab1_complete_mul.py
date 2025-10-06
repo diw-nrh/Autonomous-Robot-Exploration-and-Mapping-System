@@ -343,7 +343,7 @@ class MazeExplorer:
         self.ax = None
         
         # Initialize robot
-        self.ep_led.set_led(r=0, g=0, b=255)
+        self.ep_led.set_led(r=0, g=0, b=0)
         self.pose_handler.set_xy(0.0, 0.0)
         self.pose_handler.set_yaw(0.0)
         
@@ -514,6 +514,8 @@ class MazeExplorer:
         labels = []
         roi_rect = None  # <— เตรียมไว้ส่งให้ snapshot
         if img_full is not None:
+            # บังคับเรียงจากซ้ายภาพไปขวา
+            detections.sort(key=lambda d: d[2][0])
             h, w = img_full.shape[:2]
             roi_w, roi_h = min(550, w), min(300, h)
             roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
@@ -543,7 +545,9 @@ class MazeExplorer:
                     detections.append((user_color, shp, (roi_x + cx, roi_y + cy - 20)))
                     boxes_abs.append((abs_x, abs_y, wb, hb))
                     labels.append(f"{user_color} {shp}")
-
+        # บังคับเรียงซ้าย→ขวา (tie-break ด้วย y เพื่อความนิ่ง)
+        if detections:
+            detections.sort(key=lambda d: (d[2][0], d[2][1]))
         print(detections)
         if store:
             pos = self.current_position
@@ -657,7 +661,7 @@ class MazeExplorer:
                         if shape == self.target_shape:
                             x, y, wb, hb = cv2.boundingRect(cnt)
                             center_x = roi_x + x + wb // 2
-                            center_y = roi_y + y + hb // 2
+                            center_y = roi_y + y + hb // 2 - 20
                             target_found = True
                             break
 
@@ -945,7 +949,6 @@ class MazeExplorer:
         Returns:
             dict: ระยะทางที่วัดได้ในแต่ละทิศ
         """
-        self.ep_led.set_led(r=255, g=255, b=0, effect="breathing")
         self.internal_map.mark_explored(self.current_position)
         
         wall_distances = {}
@@ -1413,7 +1416,6 @@ class MazeExplorer:
         """
         if not path or len(path) < 2: return
         print(f"Executing path with PID: {path}")
-        self.ep_led.set_led(r=0, g=0, b=255)
         for i in range(len(path) - 1):
             self.periodic_wall_clearance_adjust(target_clearance_m=0.16)
             self.visited_for_check.append(self.current_position)
@@ -1476,7 +1478,7 @@ class MazeExplorer:
             """
             self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-            self.set_target('blue', 'circle')
+            self.set_target('blue', 'square')
             while True:
                 
                 if self.current_position not in self.internal_map.explored:
@@ -1489,7 +1491,6 @@ class MazeExplorer:
                 if not path_to_execute:
                     print(f"\n--- EXPLORATION COMPLETE! All areas explored ---")
                     
-                    self.ep_led.set_led(r=0, g=255, b=0, effect="on")
                     
                     self.close_real_time_plot()
                     break
