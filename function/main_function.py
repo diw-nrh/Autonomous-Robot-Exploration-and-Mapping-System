@@ -67,6 +67,16 @@ class VisionDetector:
         self.last_time = time.monotonic()
         self.shoot_target = []  # เก็บรายการสิ่งที่พบทั้งหมดในรอบการตรวจจับ
         self._shot_centroids = []  # เก็บตำแหน่งที่ยิงแล้ว เพื่อตัดซ้ำ
+        
+        # ⚙️ การตั้งค่า ROI สำหรับ State 2 (ปรับได้)
+        self.state2_roi_config = {
+            'width': 450,           # ความกว้าง ROI
+            'height': 450,          # ความสูง ROI  
+            'offset_x': 0,          # เลื่อนซ้าย(-)/ขวา(+) จากกึ่งกลาง
+            'offset_y': 0,          # เลื่อนบน(-)/ล่าง(+) จากกึ่งกลาง
+            'use_dynamic': False,   # ใช้ ROI แบบไดนามิกตามเป้าหมาย
+            'dynamic_size': 300     # ขนาด ROI แบบไดนามิก
+        }
         # สีสำหรับวาดกรอบในภาพ (BGR)
         self.draw_colors = {
             'red': (0, 0, 255),
@@ -79,9 +89,9 @@ class VisionDetector:
         # Color ranges (HSV)
         self.color_ranges = {
             'brown_red': ([0, 120, 70], [25, 255, 255]),
-            'dark_green': ([40, 60, 20], [85, 255, 180]),
-            'yellow_brown': ([18, 100, 100], [40, 255, 255]),
-            'dark_blue': ([95, 70, 20], [130, 255, 200])
+            'dark_green': ([60, 40, 40], [95, 255, 255]),
+            'yellow_brown': ([15, 100, 100], [25, 255, 255]),
+            'dark_blue': ([90, 60, 20], [150, 255, 255])
         }
         
         
@@ -95,6 +105,53 @@ class VisionDetector:
         
         self.target_color = None
         self.target_shape = None
+    
+    def set_state2_roi(self, width=550, height=300, offset_x=0, offset_y=0, use_dynamic=False, dynamic_size=300):
+        """🎯 ตั้งค่า ROI สำหรับ State 2
+        Args:
+            width: ความกว้าง ROI (default: 450)
+            height: ความสูง ROI (default: 450)  
+            offset_x: เลื่อนซ้าย(-)/ขวา(+) จากกึ่งกลาง (default: 0)
+            offset_y: เลื่อนบน(-)/ล่าง(+) จากกึ่งกลาง (default: 0)
+            use_dynamic: ใช้ ROI แบบไดนามิกตามเป้าหมาย (default: False)
+            dynamic_size: ขนาด ROI แบบไดนามิก (default: 300)
+        """
+        self.state2_roi_config.update({
+            'width': width,
+            'height': height,
+            'offset_x': offset_x,
+            'offset_y': offset_y,
+            'use_dynamic': use_dynamic,
+            'dynamic_size': dynamic_size
+        })
+        print(f"🎯 State 2 ROI updated: {width}x{height}, offset({offset_x},{offset_y}), dynamic={use_dynamic}")
+    
+    def _get_state2_roi(self, img, target_center=None):
+        """คำนวณ ROI สำหรับ State 2"""
+        h, w = img.shape[:2]
+        config = self.state2_roi_config
+        
+        if config['use_dynamic'] and target_center is not None:
+            # ROI แบบไดนามิกตามตำแหน่งเป้าหมาย
+            size = config['dynamic_size']
+            target_x, target_y = target_center
+            roi_x = max(0, min(w - size, target_x - size//2))
+            roi_y = max(0, min(h - size, target_y - size//2))
+            roi_w = min(size, w - roi_x)
+            roi_h = min(size, h - roi_y)
+        else:
+            # ROI แบบคงที่ที่ปรับได้
+            roi_w = min(config['width'], w)
+            roi_h = min(config['height'], h)
+            
+            # คำนวณตำแหน่งพร้อม offset
+            center_x = w // 2 + config['offset_x']
+            center_y = h // 2 + config['offset_y']
+            
+            roi_x = max(0, min(w - roi_w, center_x - roi_w//2))
+            roi_y = max(0, min(h - roi_h, center_y - roi_h//2))
+        
+        return roi_x, roi_y, roi_w, roi_h
     
     def set_target(self, color, shape):
         """ตั้งค่าเป้าหมาย"""
@@ -453,9 +510,8 @@ class VisionDetector:
                 h, w = img.shape[:2]
                 camera_w, camera_h = w//2, h//2
                 dets = self._detect_all_in_frame(img)
-                # Visualization during aiming
-                roi_w, roi_h = min(800, w), min(450, h)
-                roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
+                # Visualization during aiming - ใช้ ROI ที่กำหนดได้สำหรับ State 2
+                roi_x, roi_y, roi_w, roi_h = self._get_state2_roi(img, tgt["center"])
                 roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
                 hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
                 combined_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
@@ -690,7 +746,12 @@ def test_vision_detection():
         """
         detector.set_target('red', 'vertical_rectangle')
         
+        # 🎯 ตัวอย่างการปรับ ROI สำหรับ State 2
+        # detector.set_state2_roi(width=600, height=400, offset_x=50, offset_y=-30)  # ROI ขนาด 600x400 เลื่อนขวา 50px บน 30px
+        # detector.set_state2_roi(width=300, height=300, use_dynamic=True, dynamic_size=350)  # ROI แบบไดนามิกตามเป้าหมาย
+        
         print(f"🎯 Looking for: {detector.target_color} {detector.target_shape}")
+        print(f"📐 State 2 ROI: {detector.state2_roi_config}")
         
         # ทดสอบ detection พร้อมแสดงภาพ
         detector.detect_and_shot()
