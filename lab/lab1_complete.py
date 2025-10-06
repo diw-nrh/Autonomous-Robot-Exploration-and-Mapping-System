@@ -1261,12 +1261,12 @@ class MazeExplorer:
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
         if wall_left:
-            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m -0.02
+            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m - 0.02
             print(f"left {-move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
         elif wall_right:
-            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m -0.02
+            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m - 0.02
             print(f"right {move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
