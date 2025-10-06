@@ -328,7 +328,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         self.count = True
         # Exploration settings
-        self.border = (3, 5)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (6, 6)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
         # Exploration settings
@@ -697,12 +697,8 @@ class MazeExplorer:
                                     pass
                         else:
                             print("🎯 Target centered - firing and exiting")
-                            self.ep_blaster.fire(fire_type=self.blaster.INFRARED_FIRE,times=3)
-                            time.sleep(0.8)
-                            self.ep_blaster.fire(fire_type=self.blaster.INFRARED_FIRE,times=3)
-                            time.sleep(0.8)
-                            self.ep_blaster.fire(fire_type=self.blaster.INFRARED_FIRE,times=3)
-                            time.sleep(0.6)
+                            self.ep_blaster.fire(times=5)
+
                             self.record_target_hit(self.target_color, self.target_shape)
                             try:
                                 self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
