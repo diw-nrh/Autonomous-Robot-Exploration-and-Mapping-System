@@ -66,7 +66,17 @@ class VisionDetector:
         self.tof_handler = SimpleTofHandler(ep_robot.sensor)
         self.last_time = time.monotonic()
         self.shoot_target = []  # เก็บรายการสิ่งที่พบทั้งหมดในรอบการตรวจจับ
-        self._shot_centroids = []  # เก็บตำแหน่งที่ยิงแล้ว เพื่อตัดซ้ำ
+        self._fired_positions = []  # เก็บตำแหน่งที่ยิงแล้ว เพื่อตัดซ้ำ
+        
+        # ⚙️ การตั้งค่า ROI สำหรับ State 2 (ปรับได้)
+        self.state2_roi_config = {
+            'width': 450,           # ความกว้าง ROI
+            'height': 450,          # ความสูง ROI  
+            'offset_x': 0,          # เลื่อนซ้าย(-)/ขวา(+) จากกึ่งกลาง
+            'offset_y': 0,          # เลื่อนบน(-)/ล่าง(+) จากกึ่งกลาง
+            'use_dynamic': False,   # ใช้ ROI แบบไดนามิกตามเป้าหมาย
+            'dynamic_size': 300     # ขนาด ROI แบบไดนามิก
+        }
         # สีสำหรับวาดกรอบในภาพ (BGR)
         self.draw_colors = {
             'red': (0, 0, 255),
@@ -76,13 +86,13 @@ class VisionDetector:
             'unknown': (255, 255, 255)
         }
         
-        # Color ranges (HSV)
+        # Color ranges (HSV) - รองรับ multiple ranges สำหรับสีแดง
         self.color_ranges = {
-            # red ต้อง 2 ช่วง: 0–25 และ 170–180 (tuple ของคู่ช่วงสี)
+            # red ต้อง 2 ช่วง: 0–10 และ 170–180 (tuple ของคู่ช่วงสี)
             'brown_red': (([0, 120, 70], [10, 255, 255]), ([170, 120, 70], [180, 255, 255])),
-            'dark_green': ([40, 60, 20],   [85, 255, 180]),
-            'yellow_brown': ([18, 100, 100],[40, 255, 255]),
-            'dark_blue': ([95, 70, 20],    [130, 255, 200])
+            'dark_green': ([40, 60, 20], [85, 255, 180]),
+            'yellow_brown': ([18, 100, 100], [40, 255, 255]),
+            'dark_blue': ([95, 70, 20], [130, 255, 200])
         }
         
         
@@ -96,6 +106,53 @@ class VisionDetector:
         
         self.target_color = None
         self.target_shape = None
+    
+    def set_state2_roi(self, width=550, height=300, offset_x=0, offset_y=0, use_dynamic=False, dynamic_size=300):
+        """🎯 ตั้งค่า ROI สำหรับ State 2
+        Args:
+            width: ความกว้าง ROI (default: 450)
+            height: ความสูง ROI (default: 450)  
+            offset_x: เลื่อนซ้าย(-)/ขวา(+) จากกึ่งกลาง (default: 0)
+            offset_y: เลื่อนบน(-)/ล่าง(+) จากกึ่งกลาง (default: 0)
+            use_dynamic: ใช้ ROI แบบไดนามิกตามเป้าหมาย (default: False)
+            dynamic_size: ขนาด ROI แบบไดนามิก (default: 300)
+        """
+        self.state2_roi_config.update({
+            'width': width,
+            'height': height,
+            'offset_x': offset_x,
+            'offset_y': offset_y,
+            'use_dynamic': use_dynamic,
+            'dynamic_size': dynamic_size
+        })
+        print(f"🎯 State 2 ROI updated: {width}x{height}, offset({offset_x},{offset_y}), dynamic={use_dynamic}")
+    
+    def _get_state2_roi(self, img, target_center=None):
+        """คำนวณ ROI สำหรับ State 2"""
+        h, w = img.shape[:2]
+        config = self.state2_roi_config
+        
+        if config['use_dynamic'] and target_center is not None:
+            # ROI แบบไดนามิกตามตำแหน่งเป้าหมาย
+            size = config['dynamic_size']
+            target_x, target_y = target_center
+            roi_x = max(0, min(w - size, target_x - size//2))
+            roi_y = max(0, min(h - size, target_y - size//2))
+            roi_w = min(size, w - roi_x)
+            roi_h = min(size, h - roi_y)
+        else:
+            # ROI แบบคงที่ที่ปรับได้
+            roi_w = min(config['width'], w)
+            roi_h = min(config['height'], h)
+            
+            # คำนวณตำแหน่งพร้อม offset
+            center_x = w // 2 + config['offset_x']
+            center_y = h // 2 + config['offset_y']
+            
+            roi_x = max(0, min(w - roi_w, center_x - roi_w//2))
+            roi_y = max(0, min(h - roi_h, center_y - roi_h//2))
+        
+        return roi_x, roi_y, roi_w, roi_h
     
     def set_target(self, color, shape):
         """ตั้งค่าเป้าหมาย"""
@@ -142,10 +199,24 @@ class VisionDetector:
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         kernel = np.ones((3, 3), np.uint8)
 
-        for color_key, (lower, upper) in self.color_ranges.items():
-            lower = np.array(lower, dtype=np.uint8)
-            upper = np.array(upper, dtype=np.uint8)
-            mask = cv2.inRange(hsv, lower, upper)
+        for color_key, color_range in self.color_ranges.items():
+            # รองรับ multiple ranges สำหรับสี (เช่น สีแดงมี 2 ช่วง)
+            if isinstance(color_range[0][0], (list, tuple)):
+                # Multiple ranges (เช่น brown_red)
+                combined_mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+                for lower, upper in color_range:
+                    lower = np.array(lower, dtype=np.uint8)
+                    upper = np.array(upper, dtype=np.uint8)
+                    range_mask = cv2.inRange(hsv, lower, upper)
+                    combined_mask = cv2.bitwise_or(combined_mask, range_mask)
+                mask = combined_mask
+            else:
+                # Single range (เช่น dark_green, yellow_brown, dark_blue)
+                lower, upper = color_range
+                lower = np.array(lower, dtype=np.uint8)
+                upper = np.array(upper, dtype=np.uint8)
+                mask = cv2.inRange(hsv, lower, upper)
+            
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -246,20 +317,20 @@ class VisionDetector:
         # จำกัดจำนวนวัตถุไม่เกิน 5 อัน (ป้องกันการตรวจจับผิด)
         return reliable_objects[:5]
 
-    def _already_shot(self, center, tol=50):
-        for (sx, sy) in self._shot_centroids:
+    def _already_fired(self, center, tol=50):
+        for (sx, sy) in self._fired_positions:
             if math.hypot(center[0]-sx, center[1]-sy) <= tol:
                 return True
         return False
 
-    def detect_and_shot(self, sample_time=1.0, aim_timeout=6.0):
+    def detect_and_fire(self, sample_time=1.0, aim_timeout=6.0):
         """
         STEP 1: สแกนและบันทึกวัตถุทั้งหมดจากซ้ายไปขวา
         STEP 2: หาและยิงเฉพาะวัตถุที่ต้องการจากซ้ายไปขวา แล้วหยุด
         """
         # เตรียมระบบ
         self.shoot_target = []
-        self._shot_centroids = []
+        self._fired_positions = []
         self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
         time.sleep(0.2)
         try:
@@ -300,11 +371,22 @@ class VisionDetector:
             roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
             combined_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
-            for color_key, (lower, upper) in self.color_ranges.items():
-                lower_np = np.array(lower, dtype=np.uint8)
-                upper_np = np.array(upper, dtype=np.uint8)
-                mask = cv2.inRange(hsv, lower_np, upper_np)
-                combined_mask = cv2.bitwise_or(combined_mask, mask)
+            for color_key, color_range in self.color_ranges.items():
+                # รองรับ multiple ranges สำหรับสี
+                if isinstance(color_range[0][0], (list, tuple)):
+                    # Multiple ranges (เช่น brown_red)
+                    for lower, upper in color_range:
+                        lower_np = np.array(lower, dtype=np.uint8)
+                        upper_np = np.array(upper, dtype=np.uint8)
+                        mask = cv2.inRange(hsv, lower_np, upper_np)
+                        combined_mask = cv2.bitwise_or(combined_mask, mask)
+                else:
+                    # Single range
+                    lower, upper = color_range
+                    lower_np = np.array(lower, dtype=np.uint8)
+                    upper_np = np.array(upper, dtype=np.uint8)
+                    mask = cv2.inRange(hsv, lower_np, upper_np)
+                    combined_mask = cv2.bitwise_or(combined_mask, mask)
             frame = img.copy()
             # Draw ROI rectangle
             cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 255), 2)
@@ -338,7 +420,7 @@ class VisionDetector:
                 "shape": d["shape"],
                 "center": d["center"],
                 "bbox": d["bbox"],
-                "shot": False,
+                "completed": False,
                 "confidence": d.get("confidence", 0),
                 "detection_count": d.get("detection_count", 1),
                 "area": d.get("area", 0)
@@ -384,8 +466,8 @@ class VisionDetector:
         
         while targets_remaining and target_index < len(targets_remaining):
             tgt = targets_remaining[target_index]
-            if self._already_shot(tgt["center"]):
-                print(f"🎯 Target {target_index+1} already shot, skipping...")
+            if self._already_fired(tgt["center"]):
+                print(f"🎯 Target {target_index+1} already fired, skipping...")
                 targets_remaining.pop(target_index)  # ลบเป้าหมายที่ยิงแล้วออกจากรายการ
                 continue
                 
@@ -431,7 +513,7 @@ class VisionDetector:
                     
                     print(f"  🔄 Direct turn to target: yaw={yaw_move:.1f}°, pitch={pitch_move:.1f}°")
                     try:
-                        self.ep_gimbal.move(yaw=yaw_move, pitch=0).wait_for_completed()
+                        self.ep_gimbal.move(yaw=yaw_move, pitch=pitch_move).wait_for_completed()
                         time.sleep(0.3)
                         print(f"  ✅ Direct turn completed")
                     except Exception as e:
@@ -454,17 +536,27 @@ class VisionDetector:
                 h, w = img.shape[:2]
                 camera_w, camera_h = w//2, h//2
                 dets = self._detect_all_in_frame(img)
-                # Visualization during aiming
-                roi_w, roi_h = min(800, w), min(450, h)
-                roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
+                # Visualization during aiming - ใช้ ROI ที่กำหนดได้สำหรับ State 2
+                roi_x, roi_y, roi_w, roi_h = self._get_state2_roi(img, tgt["center"])
                 roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
                 hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
                 combined_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
-                for color_key, (lower, upper) in self.color_ranges.items():
-                    lower_np = np.array(lower, dtype=np.uint8)
-                    upper_np = np.array(upper, dtype=np.uint8)
-                    mask = cv2.inRange(hsv, lower_np, upper_np)
-                    combined_mask = cv2.bitwise_or(combined_mask, mask)
+                for color_key, color_range in self.color_ranges.items():
+                    # รองรับ multiple ranges สำหรับสี
+                    if isinstance(color_range[0][0], (list, tuple)):
+                        # Multiple ranges (เช่น brown_red)
+                        for lower, upper in color_range:
+                            lower_np = np.array(lower, dtype=np.uint8)
+                            upper_np = np.array(upper, dtype=np.uint8)
+                            mask = cv2.inRange(hsv, lower_np, upper_np)
+                            combined_mask = cv2.bitwise_or(combined_mask, mask)
+                    else:
+                        # Single range
+                        lower, upper = color_range
+                        lower_np = np.array(lower, dtype=np.uint8)
+                        upper_np = np.array(upper, dtype=np.uint8)
+                        mask = cv2.inRange(hsv, lower_np, upper_np)
+                        combined_mask = cv2.bitwise_or(combined_mask, mask)
                 frame = img.copy()
                 cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 255, 255), 2)
                 for d_vis in dets:
@@ -518,10 +610,10 @@ class VisionDetector:
                         time.sleep(0.3)
                         
                         # บันทึกสถานะยิง
-                        self._shot_centroids.append(last_seen)
-                        tgt["shot"] = True
+                        self._fired_positions.append(last_seen)
+                        tgt["completed"] = True
                         aimed_successfully = True
-                        print(f"✅ Target {target_index+1} shot successfully!")
+                        print(f"✅ Target {target_index+1} fired successfully!")
                         break
                 else:
                     # ไม่เห็นเป้า -> รอสักครู่
@@ -544,25 +636,25 @@ class VisionDetector:
                 # ไม่เพิ่ม target_index เพราะรายการสั้นลงแล้ว
                 
                 # Recenter หลังจากยิงสำเร็จ
-                print(f"🔄 Post-shot recenter...")
+                print(f"🔄 Post-firing recenter...")
                 try:
                     self.ep_gimbal.recenter().wait_for_completed()
                     time.sleep(0.5)
-                    print(f"✅ Post-shot recenter completed")
+                    print(f"✅ Post-firing recenter completed")
                 except Exception as e:
-                    print(f"⚠️ Post-shot recenter failed: {e}")
+                    print(f"⚠️ Post-firing recenter failed: {e}")
             else:
                 # ถ้ายิงไม่สำเร็จ ไปเป้าถัดไป
                 target_index += 1
             
             # แสดงความคืบหน้า
-            shot_so_far = sum(1 for s in self.shoot_target if s["shot"])
-            print(f"📊 Progress: Shot {shot_so_far} targets, {len(targets_remaining)} targets remaining")
+            completed_so_far = sum(1 for s in self.shoot_target if s["completed"])
+            print(f"📊 Progress: Completed {completed_so_far} targets, {len(targets_remaining)} targets remaining")
         
         print(f"\n🏁 STEP 2 COMPLETED: Finished shooting sequence!")
 
         # สรุปผลการปฏิบัติงาน
-        shot_count = sum(1 for s in self.shoot_target if s["shot"])
+        completed_count = sum(1 for s in self.shoot_target if s["completed"])
         total_found = len(self.shoot_target)
         target_count = len(targets_to_shoot)
         
@@ -571,14 +663,14 @@ class VisionDetector:
         print(f"="*60)
         print(f"📊 Total objects found: {total_found}")
         print(f"🎯 Target objects ({self.target_color} {self.target_shape}): {target_count}")
-        print(f"🔫 Successfully shot: {shot_count}/{target_count}")
-        print(f"📈 Success rate: {(shot_count/target_count*100):.1f}%" if target_count > 0 else "📈 Success rate: N/A")
+        print(f"🔫 Successfully fired: {completed_count}/{target_count}")
+        print(f"📈 Success rate: {(completed_count/target_count*100):.1f}%" if target_count > 0 else "📈 Success rate: N/A")
         
         print(f"\n📝 DETAILED RESULTS (by reliability):")
         for i, s in enumerate(self.shoot_target, 1):
             is_target = (s["color"] == self.target_color and s["shape"] == target_shape)
             target_marker = "🎯" if is_target else "  "
-            status = "✅ SHOT" if s["shot"] else ("❌ MISSED" if is_target else "⚪ IGNORED")
+            status = "✅ COMPLETED" if s["completed"] else ("❌ MISSED" if is_target else "⚪ IGNORED")
             print(f"  {target_marker} {i:2d}. {s['color']:6s} {s['shape']:12s} at {s['center']} | {status}")
         
         # ปิดหน้าต่าง
@@ -691,10 +783,15 @@ def test_vision_detection():
         """
         detector.set_target('red', 'vertical_rectangle')
         
+        # 🎯 ตัวอย่างการปรับ ROI สำหรับ State 2
+        # detector.set_state2_roi(width=600, height=400, offset_x=50, offset_y=-30)  # ROI ขนาด 600x400 เลื่อนขวา 50px บน 30px
+        # detector.set_state2_roi(width=300, height=300, use_dynamic=True, dynamic_size=350)  # ROI แบบไดนามิกตามเป้าหมาย
+        
         print(f"🎯 Looking for: {detector.target_color} {detector.target_shape}")
+        print(f"📐 State 2 ROI: {detector.state2_roi_config}")
         
         # ทดสอบ detection พร้อมแสดงภาพ
-        detector.detect_and_shot()
+        detector.detect_and_fire()
         
         # แสดงภาพจากกล้องต่อเนื่องหลังจากยิงเสร็จ
         print("\n📹 Press 'q' to quit camera view...")
