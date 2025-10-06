@@ -325,7 +325,7 @@ class MazeExplorer:
         self.current_orientation = 0  # 0:N, 1:E, 2:S, 3:W
         self.internal_map = RobotMap()
         self.visited_path = [self.current_position]
-        
+        self.count = 0
         # Exploration settings
         self.border = (3, 3)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
@@ -503,7 +503,7 @@ class MazeExplorer:
         ถ้า save_snapshot=True จะบันทึกภาพพร้อมกรอบ
         """
         # ลอง recenter ให้ภาพอยู่มุมกลางก่อนสแกน (กันค้าง)
-        self.ep_gimbal.moveto(pitch=-5, yaw=0, pitch_speed=120).wait_for_completed()
+        self.ep_gimbal.moveto(pitch=-10, yaw=0, pitch_speed=120).wait_for_completed()
         img_full = None
         for _ in range(4):
             img_full = self.ep_camera.read_cv2_image(strategy="newest")
@@ -564,7 +564,7 @@ class MazeExplorer:
         """
         self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
         tof_dist = self.tof_handler.get_distance()
-        if 300 < tof_dist < 1000:
+        if 300 < tof_dist < 1200:
             # Phase 1 (บันทึกภาพด้วย)
             detections = self.scan_objects_fullframe(store=True, save_snapshot=True)
             time.sleep(0.5)
@@ -580,7 +580,7 @@ class MazeExplorer:
             pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
             pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
             try:
-                self.ep_gimbal.moveto(pitch=-5, yaw=0, pitch_speed=120).wait_for_completed()
+                self.ep_gimbal.moveto(pitch=-10, yaw=0, pitch_speed=120).wait_for_completed()
             except Exception:
                 pass
             time.sleep(0.2)
@@ -893,10 +893,13 @@ class MazeExplorer:
             print(f"         - IR Left: Wall={wall_left}")
             return has_wall, distance_mm
             
-        else:  # ด้านหลัง -> สมมติไม่มีกำแพง
-            distance_mm = 1000.0
-            print(f"         - Back: Assuming no wall")
-            return False, distance_mm
+        elif relative_direction == 4 and self.count == 0:
+            self.ep_gimbal.move(yaw=180,pitch=-10).wait_for_complete()
+            distance_mm = self.tof_handler.get_distance()
+            has_wall = distance_mm < WALL_THRESHOLD_MM
+            print(f"         - ToF Front: {distance_mm:.1f} mm, Wall: {has_wall}")
+            self.count +=1
+            return has_wall, distance_mm
     
     def scan_surroundings_with_gimbal(self, previous_position=None):
         """
@@ -1095,6 +1098,10 @@ class MazeExplorer:
 
     def update_real_time_plot(self):
         """อัปเดต real-time plot"""
+       # ปิดทันทีถ้าภารกิจสำเร็จ
+        if getattr(self, "exploration_complete", False):
+           self.close_real_time_plot()
+           return
         if not self.real_time_plot or self.fig is None:
             return
             
@@ -1228,14 +1235,17 @@ class MazeExplorer:
             print(f"Error updating real-time plot: {e}")
 
     def close_real_time_plot(self):
-        """ปิด real-time plotting"""
-        if self.real_time_plot and self.fig is not None:
-            try:
-                plt.ioff()  # ปิด interactive mode
+        try:
+            if self.fig is not None:
+                plt.ioff()
                 plt.close(self.fig)
-                print("Real-time plotting closed")
-            except Exception as e:
-                print(f"Error closing real-time plot: {e}")
+            # กันถูกเรียกอัปเดตซ้ำหลังปิดแล้ว
+            self.fig = None
+            self.ax = None
+            self.real_time_plot = False
+            print("Real-time plotting closed")
+        except Exception as e:
+            print(f"Error closing real-time plot: {e}")
 
     # ========================================================================
     # Sensor Adjustment Functions
@@ -1251,7 +1261,7 @@ class MazeExplorer:
 
         # ToF หน้า
         front_distance_mm = self.tof_handler.get_distance()
-
+        time.sleep(0.5)
         wall_left, wall_right, sharp_left_dist, sharp_right_dist = self._read_ir_sensors()
         print(f"   Sensors: Front={front_distance_mm:.1f}mm, Left={sharp_left_dist:.1f}mm, Right={sharp_right_dist:.1f}mm")
         print(f"   Left={sharp_left_dist}, Right={sharp_right_dist}",wall_left,wall_right)
@@ -1261,12 +1271,12 @@ class MazeExplorer:
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
         if wall_left:
-            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m - 0.02
+            move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m-0.02
             print(f"left {-move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
         elif wall_right:
-            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m - 0.02
+            move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m-0.02
             print(f"right {move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
@@ -1440,6 +1450,7 @@ class MazeExplorer:
                     self.ep_camera.stop_video_stream()
                     time.sleep(0.5)
                     A=self.shoot_grid
+                    self.close_real_time_plot()
                     print(A)
                     break
                 self.execute_path(path_to_execute)
