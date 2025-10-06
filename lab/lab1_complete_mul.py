@@ -698,7 +698,7 @@ class MazeExplorer:
                         else:
                             print("🎯 Target centered - firing and exiting")
                             self.ep_blaster.fire(times=5)
-
+                            time.sleep(0.01)
                             self.record_target_hit(self.target_color, self.target_shape)
                             try:
                                 self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
