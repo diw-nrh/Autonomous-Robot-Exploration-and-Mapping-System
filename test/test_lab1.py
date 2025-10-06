@@ -503,7 +503,7 @@ class MazeExplorer:
         ถ้า save_snapshot=True จะบันทึกภาพพร้อมกรอบ
         """
         # ลอง recenter ให้ภาพอยู่มุมกลางก่อนสแกน (กันค้าง)
-        self.ep_gimbal.moveto(pitch=-10, yaw=0, pitch_speed=120).wait_for_completed()
+        self.ep_gimbal.moveto(pitch=-5, yaw=0, pitch_speed=120).wait_for_completed()
         img_full = None
         for _ in range(4):
             img_full = self.ep_camera.read_cv2_image(strategy="newest")
@@ -580,7 +580,7 @@ class MazeExplorer:
             pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
             pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
             try:
-                self.ep_gimbal.moveto(pitch=-10, yaw=0, pitch_speed=120).wait_for_completed()
+                self.ep_gimbal.moveto(pitch=-5, yaw=0, pitch_speed=120).wait_for_completed()
             except Exception:
                 pass
             time.sleep(0.2)
@@ -1362,9 +1362,7 @@ class MazeExplorer:
         print(f"Executing path with PID: {path}")
         self.ep_led.set_led(r=0, g=0, b=255)
         for i in range(len(path) - 1):
-            if self.current_position in self.visited_for_check:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.16)
-                print(f"\nPosition {self.current_position} already explored. Skipping scan.")
+            self.periodic_wall_clearance_adjust(target_clearance_m=0.16)
             self.visited_for_check.append(self.current_position)
             start_node, end_node = path[i], path[i+1]
             dx, dy = end_node[0] - start_node[0], end_node[1] - start_node[1]
@@ -1383,6 +1381,7 @@ class MazeExplorer:
             self.turn_pid(target_angle)
             self.current_orientation = target_orientation
             if before_orientation != self.current_orientation:
+                self.periodic_wall_clearance_adjust(target_clearance_m=0.16)
                 self.detect_and_shot()
             time.sleep(0.2)
             self.move_forward_pid(GRID_SIZE_M)
@@ -1425,7 +1424,6 @@ class MazeExplorer:
 
             self.set_target('red', 'horizontal_rectangle')
             while True:
-                self.periodic_wall_clearance_adjust(target_clearance_m=0.16)
                 
                 if self.current_position not in self.internal_map.explored:
                     previous_pos = self.visited_path[-2] if len(self.visited_path) > 1 else None
