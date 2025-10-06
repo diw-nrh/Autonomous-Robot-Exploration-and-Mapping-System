@@ -503,7 +503,7 @@ class MazeExplorer:
         ถ้า save_snapshot=True จะบันทึกภาพพร้อมกรอบ
         """
         # ลอง recenter ให้ภาพอยู่มุมกลางก่อนสแกน (กันค้าง)
-        self.ep_gimbal.moveto(pitch=-15, yaw=0, pitch_speed=120).wait_for_completed()
+        self.ep_gimbal.moveto(pitch=-10, yaw=0, pitch_speed=120).wait_for_completed()
         img_full = None
         for _ in range(4):
             img_full = self.ep_camera.read_cv2_image(strategy="newest")
@@ -570,6 +570,8 @@ class MazeExplorer:
             time.sleep(0.5)
             pairs = [(c, s) for (c, s, _center) in detections]
             pos, ori = self.current_position, self.current_orientation
+            print(pairs)
+            print((self.target_color, self.target_shape) not in pairs)
             if (self.target_color, self.target_shape) not in pairs:
                 print(f"⚠️ ไม่พบ {self.target_color}-{self.target_shape} ที่ {pos} ori={ori}; ข้ามการเล็งยิง")
                 return None
@@ -578,7 +580,7 @@ class MazeExplorer:
             pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
             pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
             try:
-                self.ep_gimbal.moveto(pitch=-15, yaw=0, pitch_speed=120).wait_for_completed()
+                self.ep_gimbal.moveto(pitch=-10, yaw=0, pitch_speed=120).wait_for_completed()
             except Exception:
                 pass
             time.sleep(0.2)
@@ -1268,6 +1270,7 @@ class MazeExplorer:
             print(f"right {move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
+        self.ep_chassis.move(x=0, y=0, z=0, xy_speed=0.5).wait_for_completed()
 
     # ========================================================================
     # Movement and PID Control Functions
