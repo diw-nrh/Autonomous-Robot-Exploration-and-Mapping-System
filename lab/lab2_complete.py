@@ -31,14 +31,13 @@ import numpy as np
 from lab1_complete_mul import (
     robot,                      # robomaster.robot
     MazeExplorer,               # คลาสหลักจาก LAB1
-    GRID_SIZE_M,                # ขนาดกริด
-    plot_map_with_walls,        # ฟังก์ชันวาดแผนที่ (เผื่ออยากบันทึก)
+    GRID_SIZE_M,                # ขนาดกริด     # ฟังก์ชันวาดแผนที่ (เผื่ออยากบันทึก)
 )
 CAMERA_HORIZONTAL_FOV = 96
 CAMERA_VERTICAL_FOV = 54
 # ====== ตั้งชื่อไฟล์ JSON (แก้ให้ตรงกับไฟล์ที่ได้จาก LAB 1) ======
-MAP_JSON_PATH = "map_state_run1_20251006_170953.json"
-TARGETS_JSON_PATH = "targets_run1_20251006_170953.json"
+MAP_JSON_PATH = "map_state_run1_20251006_185258.json"
+TARGETS_JSON_PATH = "targets_run1_20251006_185258.json"
 
 # ====== Utility: สร้างกราฟ/BFS จาก JSON ======
 def _graph_from_json(map_payload):
@@ -395,46 +394,39 @@ class MazeTargetRunner(MazeExplorer):
             # ถ้าไม่ได้ฟิลเตอร์ ให้ตั้งเป็นค่าสี/รูปทรงตัวแรก
             self.set_target(use_targets[0]["color"], use_targets[0]["shape"])
 
-        # ไล่ไปทีละเป้าหมาย (เรียงใกล้สุดทีละจุดก็ได้)
+        # ไล่ไปทีละ "เป้าหมาย" (grid + orientation) เพื่อคงทิศตามไฟล์ targets
         current = self.current_position
-        remaining = [(t["grid"]["x"], t["grid"]["y"]) for t in use_targets]
+        remaining_targets = list(use_targets)
         self.ep_camera.start_video_stream(display=False, resolution="720p")
         def manhattan(a,b): return abs(a[0]-b[0]) + abs(a[1]-b[1])
 
-        while remaining:
-            # เลือกจุดที่ใกล้ current ที่สุด (heuristic ง่ายๆ)
-            remaining.sort(key=lambda p: manhattan(current, p))
-            goal = remaining.pop(0)
+        while remaining_targets:
+            # เลือกเป้าหมายที่กริดใกล้ current ที่สุด
+            remaining_targets.sort(key=lambda t: manhattan(current, (t["grid"]["x"], t["grid"]["y"])) )
+            tgt = remaining_targets.pop(0)
 
-            # หาเส้นทาง
+            goal = (tgt["grid"]["x"], tgt["grid"]["y"])
             print(graph, current, goal)
             path = _bfs_path(graph, current, goal)
             if not path:
                 print(f"❌ ไป {goal} ไม่ได้ (no path)")
                 continue
-            # (ออปชัน) ถ้ามีข้อมูลสี/ทรงของจุด goal ในไฟล์ targets ให้ตั้งค่าก่อนยิง
-            goal_target = next((t for t in use_targets
-                                if (t["grid"]["x"], t["grid"]["y"]) == goal), None)
-            if goal_target:
-                self.set_target(goal_target["color"], goal_target["shape"])
 
-            # เดินไปถึงเป้าแล้ว “จัดทิศตามไฟล์ targets แล้วค่อยยิงเมื่อถึงปลายทาง”
-            fin_orient = goal_target.get("orientation") if goal_target else None
+            # ตั้งสี/รูปทรง แล้วไปถึงกริดปลายทาง จากนั้นจัดทิศตาม target นี้และยิง
+            self.set_target(tgt["color"], tgt["shape"])
+            fin_orient = tgt.get("orientation")
             self.execute_path(path, shoot_on_arrival=True, final_orientation=fin_orient)
 
             current = goal
             self.current_position = goal
             self.pose_handler.set_xy(goal[0] * GRID_SIZE_M, goal[1] * GRID_SIZE_M)
-        self.ep_camera.stop_video_stream()
+        
 
         print("✅ รอบ 2 เสร็จสิ้น")
         if draw_after:
-            plot_map_with_walls(
-                self.internal_map.graph,
-                self.internal_map.blocked,
-                self.visited_path,
-                filename="maze_run2_path.png"
-            )
+            # ใช้ signature แบบอ้างอิงสถานะภายในอ็อบเจ็กต์เท่านั้น
+            self.plot_map_with_walls(filename="maze_run2_path.png")
+        self.ep_camera.stop_video_stream()
 
 # ================= MAIN =================
 if __name__ == "__main__":
@@ -456,7 +448,7 @@ if __name__ == "__main__":
     ep.gimbal.sub_angle(freq=20, callback=gim.update)
     # (จะไม่ต้องอ่าน ToF ก็ได้ แต่ถ้าอยาก log ต่อ ก็สมัครไว้)
     ep.sensor.sub_distance(freq=10, callback=tof.update)
-    START_MODE = "resume"  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
+    START_MODE = "fresh"  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
     runner = MazeTargetRunner(ep, tof, gim, pose)
     runner.set_target('yellow', 'horizontal_rectangle')  # ค่า default เผื่อไม่มี filter
 
