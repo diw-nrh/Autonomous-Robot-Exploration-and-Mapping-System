@@ -108,7 +108,9 @@ def ts_scan_entry(ep_robot, colors_map, color_ranges, pos, ori, roi_max=(800, 45
     Stateless; no persistence.
     """
     try:
-        img = ep_robot.camera.read_cv2_image(strategy="newest", timeout=1)
+        for _ in range(4):
+            img = ep_robot.camera.read_cv2_image(strategy="newest", timeout=1)
+            time.sleep(0.1)
     except Exception:
         img = None
     if img is None:
