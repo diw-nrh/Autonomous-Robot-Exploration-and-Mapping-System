@@ -33,11 +33,11 @@ from lab1_complete_mul import (
     MazeExplorer,               # คลาสหลักจาก LAB1
     GRID_SIZE_M,                # ขนาดกริด     # ฟังก์ชันวาดแผนที่ (เผื่ออยากบันทึก)
 )
-CAMERA_HORIZONTAL_FOV = 96
-CAMERA_VERTICAL_FOV = 54
+CAMERA_HORIZONTAL_FOV = 109
+CAMERA_VERTICAL_FOV = 93
 # ====== ตั้งชื่อไฟล์ JSON (แก้ให้ตรงกับไฟล์ที่ได้จาก LAB 1) ======
-MAP_JSON_PATH = "map_state_run1_20251006_185258.json"
-TARGETS_JSON_PATH = "targets_run1_20251006_185258.json"
+MAP_JSON_PATH = "map_state_run1_20251006_194731.json"
+TARGETS_JSON_PATH = "targets_run1_20251006_194731.json"
 
 # ====== Utility: สร้างกราฟ/BFS จาก JSON ======
 def _graph_from_json(map_payload):
@@ -138,171 +138,6 @@ class MazeTargetRunner(MazeExplorer):
                 pass
             self.detect_and_shot()
 
-    def detect_and_shot(self):
-        """
-        Phase 2: เล็ง/ยิง เฉพาะเมื่อ (target_color, target_shape) มีอยู่ในกริดปัจจุบัน
-        """
-        self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-        tof_dist = self.tof_handler.get_distance()
-        if 300 < tof_dist < 1200:
-            # Phase 1 (บันทึกภาพด้วย)
-            detections = self.scan_objects_fullframe(store=True, save_snapshot=True)
-            time.sleep(0.5)
-            pairs = [(c, s) for (c, s, _center) in detections]
-            center_pairs = [ctr for (c, s, ctr) in detections
-                            if (c, s) == (self.target_color, self.target_shape)]
-            # เรียงซ้าย→ขวา
-            center_pairs.sort(key=lambda p: p[0])
-            pos, ori = self.current_position, self.current_orientation
-            print(pairs)
-            print((self.target_color, self.target_shape) not in pairs)
-            if (self.target_color, self.target_shape) not in pairs:
-                print(f"⚠️ ไม่พบ {self.target_color}-{self.target_shape} ที่ {pos} ori={ori}; ข้ามการเล็งยิง")
-                return None
-
-            # 3) เริ่มเล็ง/ยิง (ของเดิม) — ย่อให้เหลือแก่น
-            pid_yaw = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=10.0)
-            pid_pitch = PID(kp=0.20, ki=0.00, kd=0.00, integ_clip=40.0, out_clip=8.0)
-            try:
-                self.ep_gimbal.moveto(pitch=-10, yaw=0, pitch_speed=120).wait_for_completed()
-            except Exception:
-                pass
-            time.sleep(0.2)
-
-            center_x = center_y = None
-            timebefore = time.monotonic()
-            self.last_time = time.monotonic()
-            len_targets_before = len(self.detected_targets)
-            for i in range(len(center_pairs)):
-                center_x, center_y = center_pairs[i]
-                dist_tof = self.tof_handler.get_distance()
-                # 1) แปลงพิกัดพิกเซล → มุม (ใช้ FOV)
-                # ใช้ขนาดภาพจริงถ้ามี; ถ้าไม่มีตั้งเป็น 1280x720
-                w, h = 1280.0, 720.0
-                hfov = math.radians(CAMERA_HORIZONTAL_FOV)
-                vfov = math.radians(CAMERA_VERTICAL_FOV)
-                fx = (w / 2.0) / math.tan(hfov / 2.0)   # focal length (px) แนวนอน
-                fy = (h / 2.0) / math.tan(vfov / 2.0)   # focal length (px) แนวตั้ง
-                dx = center_x - (w / 2.0)
-                dy = center_y - (h / 2.0)
-                yaw_err_deg   = math.degrees(math.atan2(dx, fx))     # + คือหันขวา
-                pitch_err_deg = -math.degrees(math.atan2(dy, fy))    # + คือเงยขึ้น (y จอเพิ่มลง)
-
-                # 2) สเกลตามระยะ ToF: ใกล้มาก → ก้าวสั้นลง
-                #    300–1000 mm → scale ~ 0.4–1.0 (ปรับได้ตามหน้างาน)
-                scale = max(0.4, min(1.0, (dist_tof - 300.0) / 700.0))
-                yaw_step   = max(-25.0, min(25.0,  yaw_err_deg   * scale))
-                pitch_step = max(-20.0, min(20.0,  pitch_err_deg * scale))
-
-                # 3) ขยับแบบ relative เพื่อเลี่ยง absolute jump
-                try:
-                    self.ep_gimbal.move(yaw=yaw_step, pitch=pitch_step, yaw_speed=120, pitch_speed=120).wait_for_completed()
-                except Exception:
-                    # fallback: ใช้ moveto โดยบวกเพิ่มจากมุมปัจจุบัน
-                    cyaw, cpitch = self.gimbal_handler.get_yaw_pitch()
-                    self.ep_gimbal.moveto(yaw=cyaw + yaw_step, pitch=cpitch + pitch_step,
-                                          yaw_speed=120, pitch_speed=120).wait_for_completed()
-                while True:
-                    try:
-                        img = self.ep_camera.read_cv2_image(strategy="newest", timeout=3)
-                        if img is None:
-                            continue
-                    except queue.Empty:
-                        continue
-
-                    color_key = self.colors.get(self.target_color, self.target_color)
-                    if color_key not in self.color_ranges:
-                        print(f"⚠️ ไม่พบสี '{self.target_color}' ในระบบ")
-                        return []
-
-                    # ROI กลางภาพ
-                    h, w = img.shape[:2]
-                    roi_w, roi_h = min(300, w), min(300, h)
-                    roi_x, roi_y = (w - roi_w) // 2, (h - roi_h) // 2
-                    roi = img[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
-
-                    blur = cv2.GaussianBlur(roi, (5, 5), 0)
-                    hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-                    mask = self._build_mask(hsv, self.color_ranges[color_key])
-                    kernel = np.ones((5, 5), np.uint8)
-                    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-                    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    target_found = False
-                    for cnt in contours:
-                        if cv2.contourArea(cnt) < 200:
-                            continue
-                        shape = self._classify_shape(cnt)
-                        if shape == self.target_shape:
-                            x, y, wb, hb = cv2.boundingRect(cnt)
-                            center_x = roi_x + x + wb // 2
-                            center_y = roi_y + y + hb // 2
-                            target_found = True
-                            break
-
-                    # แสดงหน้าต่างเพื่อดีบัก (ถ้าต้องการคงไว้)
-                    try:
-                        cv2.imshow("RoboMaster Detection", img)
-                        cv2.imshow("Mask", mask)
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            print("🔴 User pressed 'q' - exiting detection")
-                            break
-                    except Exception:
-                        pass
-
-                    now = time.monotonic()
-                    dt = now - self.last_time
-                    self.last_time = now
-
-                    camera_w = 1280 // 2
-                    camera_h = 720 // 2
-
-                    if target_found:
-                        err_x = (center_x - camera_w)
-                        err_y = (center_y - camera_h)
-                        yaw_cmd = pid_yaw.step(err_x, dt)
-                        pitch_cmd = pid_pitch.step(err_y, dt)
-                        if abs(yaw_cmd) > 0.05 or abs(pitch_cmd) > 0.05:
-                            try:
-                                self.ep_gimbal.drive_speed(pitch_speed=-pitch_cmd, yaw_speed=yaw_cmd)
-                            except Exception:
-                                try:
-                                    self.ep_gimbal.drive_speed(pitch_speed=pitch_cmd, yaw_speed=yaw_cmd)
-                                except Exception:
-                                    pass
-                        else:
-                            print("🎯 Target centered - firing and exiting")
-                            self.ep_blaster.fire(times=3)
-                            time.sleep(0.8)
-                            self.ep_blaster.fire(times=3)
-                            time.sleep(0.8)
-                            self.ep_blaster.fire(times=3)
-                            time.sleep(0.6)
-                            self.record_target_hit(self.target_color, self.target_shape)
-                            try:
-                                self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
-                                self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-                            except Exception:
-                                pass
-                            try:
-                                cv2.destroyAllWindows()
-                            except Exception:
-                                pass
-                            break
-
-                    elif time.monotonic() - timebefore > 10.0:
-                        # กันวนค้างนานเกินถ้าไม่เจอ
-                        try:
-                            self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-                            cv2.destroyAllWindows()
-                        except Exception:
-                            pass
-                        break
-
-                    center_x = center_y = None
-                self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
-        
     @staticmethod
     def _infer_yaw_from_path(visited_path):
         """เดายอว์จากสองพอยต์สุดท้ายของ visited_path"""
@@ -448,7 +283,7 @@ if __name__ == "__main__":
     ep.gimbal.sub_angle(freq=20, callback=gim.update)
     # (จะไม่ต้องอ่าน ToF ก็ได้ แต่ถ้าอยาก log ต่อ ก็สมัครไว้)
     ep.sensor.sub_distance(freq=10, callback=tof.update)
-    START_MODE = "fresh"  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
+    START_MODE = "resume"  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
     runner = MazeTargetRunner(ep, tof, gim, pose)
     runner.set_target('yellow', 'horizontal_rectangle')  # ค่า default เผื่อไม่มี filter
 

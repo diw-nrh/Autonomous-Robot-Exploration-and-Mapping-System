@@ -697,11 +697,11 @@ class MazeExplorer:
                                     pass
                         else:
                             print("🎯 Target centered - firing and exiting")
-                            self.ep_blaster.fire(times=3)
+                            self.ep_blaster.fire(fire_type=self.blaster.INFRARED_FIRE,times=3)
                             time.sleep(0.8)
-                            self.ep_blaster.fire(times=3)
+                            self.ep_blaster.fire(fire_type=self.blaster.INFRARED_FIRE,times=3)
                             time.sleep(0.8)
-                            self.ep_blaster.fire(times=3)
+                            self.ep_blaster.fire(fire_type=self.blaster.INFRARED_FIRE,times=3)
                             time.sleep(0.6)
                             self.record_target_hit(self.target_color, self.target_shape)
                             try:
