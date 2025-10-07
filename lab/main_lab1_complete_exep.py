@@ -322,7 +322,7 @@ class MazeExplorer:
         # Navigation state
         self.shoot_grid = [] 
         self.visited_for_check = []
-        self.current_position = (2, 0)
+        self.current_position = (1, 0)
         self.current_orientation = 0  # 0:N, 1:E, 2:S, 3:W
         self.internal_map = RobotMap()
         self.visited_path = [self.current_position]
@@ -699,7 +699,6 @@ class MazeExplorer:
                                     pass
                         else:
                             print("🎯 Target centered - firing and exiting")
-                            self.ep_blaster.fire(fire_type=self.blaster.INFRARED_FIRE,times=2)
                             time.sleep(0.5)
                             self.ep_blaster.fire(times=1)
                             time.sleep(0.5)
