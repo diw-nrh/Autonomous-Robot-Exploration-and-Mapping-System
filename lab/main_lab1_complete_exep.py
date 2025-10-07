@@ -50,7 +50,7 @@ import numpy as np
 # =============================================================================
 
 # Robot Movement and Grid Settings
-GRID_SIZE_M = 0.65                # ขนาดกริดเป็นเมตร
+GRID_SIZE_M = 0.62                # ขนาดกริดเป็นเมตร
 WALL_THRESHOLD_MM = 450                # เกณฑ์ระยะทางที่ถือว่ามีกำแพง (มม.)
 
 # Gimbal and Vision Settings
@@ -328,7 +328,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         self.count = True
         # Exploration settings
-        self.border = (3, 3)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (6, 6)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
         # Exploration settings
@@ -495,6 +495,8 @@ class MazeExplorer:
             cv2.imwrite(fname, vis)
             print(f"[SNAPSHOT] saved → {fname}")
         except Exception as e:
+            self.save_targets_json()
+            self.save_map_state_json()
             print(f"[SNAPSHOT] error: {e}")
             
     def scan_objects_fullframe(self, store=True, save_snapshot=True):
@@ -569,7 +571,7 @@ class MazeExplorer:
         """
         self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
         tof_dist = self.tof_handler.get_distance()
-        if 300 < tof_dist < 1200 and self.current_position and (self.current_position, self.current_orientation) not in self.watched_grid:
+        if 450 < tof_dist < 1200 and self.current_position and (self.current_position, self.current_orientation) not in self.watched_grid:
             self.watched_grid.append((self.current_position, self.current_orientation))
             # Phase 1 (บันทึกภาพด้วย)
             detections = self.scan_objects_fullframe(store=True, save_snapshot=True)
@@ -698,11 +700,9 @@ class MazeExplorer:
                         else:
                             print("🎯 Target centered - firing and exiting")
                             self.ep_blaster.fire(fire_type=self.blaster.INFRARED_FIRE,times=3)
-                            time.sleep(0.8)
-                            self.ep_blaster.fire(fire_type=self.blaster.INFRARED_FIRE,times=3)
-                            time.sleep(0.8)
-                            self.ep_blaster.fire(fire_type=self.blaster.INFRARED_FIRE,times=3)
-                            time.sleep(0.6)
+                            time.sleep(0.5)
+                            self.ep_blaster.fire(times=3)
+                            time.sleep(0.5)
                             self.record_target_hit(self.target_color, self.target_shape)
                             try:
                                 self.ep_gimbal.drive_speed(pitch_speed=0, yaw_speed=0)
@@ -744,6 +744,8 @@ class MazeExplorer:
                     "tof_distance_mm": tof,
                 })
             except Exception as e:
+                self.save_targets_json()
+                self.save_map_state_json()
                 print(f"[Logging Thread] Error: {e}")
             dt = time.time() - t0
             if dt < period:
@@ -780,6 +782,8 @@ class MazeExplorer:
                     w.writerows(self.continuous_sensor_log)
                 print(f"[CSV] continuous_sensor_log_{ts}.csv saved")
             except Exception as e:
+                self.save_targets_json()
+                self.save_map_state_json()
                 print(f"[CSV] Error saving continuous log: {e}")
 
         # 2) scan per grid
@@ -1139,6 +1143,8 @@ class MazeExplorer:
             plt.show(block=False)
             print("Real-time plotting initialized")
         except Exception as e:
+            self.save_targets_json()
+            self.save_map_state_json()
             print(f"Failed to initialize real-time plot: {e}")
             self.real_time_plot = False
 
@@ -1289,6 +1295,8 @@ class MazeExplorer:
             plt.pause(0.1)  # หน่วงเวลาเล็กน้อยให้เห็นการเปลี่ยนแปลง
             
         except Exception as e:
+            self.save_targets_json()
+            self.save_map_state_json()
             print(f"Error updating real-time plot: {e}")
 
     def close_real_time_plot(self):
@@ -1302,6 +1310,8 @@ class MazeExplorer:
             self.real_time_plot = False
             print("Real-time plotting closed")
         except Exception as e:
+            self.save_targets_json()
+            self.save_map_state_json()
             print(f"Error closing real-time plot: {e}")
 
     # ========================================================================
@@ -1327,11 +1337,13 @@ class MazeExplorer:
             move_dist_m = (front_distance_mm / 1000.0) - target_clearance_m
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=move_dist_m, y=0, z=0, xy_speed=0.5).wait_for_completed()
+        time.sleep(0.01)
         if wall_left:
             move_dist_m = (sharp_left_dist / 1000.0) - target_clearance_m-0.02
             print(f"left {-move_dist_m}")
             if abs(move_dist_m) > 0.05:
                 self.ep_chassis.move(x=0, y=-move_dist_m, z=0, xy_speed=0.5).wait_for_completed()
+        
         elif wall_right:
             move_dist_m = (sharp_right_dist / 1000.0) - target_clearance_m-0.02
             print(f"right {move_dist_m}")
@@ -1343,7 +1355,7 @@ class MazeExplorer:
     # Movement and PID Control Functions
     # ========================================================================
     
-    def move_forward_pid(self, distance_m, speed_limit=0.6):
+    def move_forward_pid(self, distance_m, speed_limit=1):
         """
         ใช้ PID controller เพื่อเคลื่อนที่ไปข้างหน้าระยะทางที่กำหนด
         
@@ -1367,10 +1379,10 @@ class MazeExplorer:
             remaining = distance_m - dist_traveled
             if abs(remaining) < 0.1:
                 break
-            self.ep_chassis.move(x=remaining, y=0, z=0, xy_speed=1).wait_for_completed()
-
-            self.ep_chassis.move(x=0, y=0, z=0, xy_speed=1).wait_for_completed()
+            self.ep_chassis.move(x=remaining, y=0, z=0, xy_speed=speed_limit).wait_for_completed()
             time.sleep(0.01)
+        self.ep_chassis.move(x=0, y=0, z=0, xy_speed=speed_limit).wait_for_completed()
+        time.sleep(0.5)
         print("   PID Move: Completed.")
 
         gx, gy = self.current_position
@@ -1482,7 +1494,7 @@ class MazeExplorer:
             """
             self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-            self.set_target('blue', 'square')
+            self.set_target('green', 'circle')
             while True:
                 
                 if self.current_position not in self.internal_map.explored:
@@ -1502,6 +1514,8 @@ class MazeExplorer:
                 # อัปเดตแผนที่หลังเคลื่อนที่
                 self.update_real_time_plot()
         except Exception as e:
+                self.save_targets_json()
+                self.save_map_state_json()
                 print(f"{e}")
         finally:
             self.save_targets_json()
@@ -1750,6 +1764,7 @@ if __name__ == '__main__':
             ep_robot.close()
             print("Robot connection closed safely.")
         except Exception as e:
+            
             print(f"Warning during robot cleanup: {e}")
     
     print("✅ Mission completed and cleanup finished.")

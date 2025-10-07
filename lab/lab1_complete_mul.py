@@ -50,7 +50,7 @@ import numpy as np
 # =============================================================================
 
 # Robot Movement and Grid Settings
-GRID_SIZE_M = 0.6                # ขนาดกริดเป็นเมตร
+GRID_SIZE_M = 0.62                # ขนาดกริดเป็นเมตร
 WALL_THRESHOLD_MM = 450                # เกณฑ์ระยะทางที่ถือว่ามีกำแพง (มม.)
 
 # Gimbal and Vision Settings
@@ -569,7 +569,7 @@ class MazeExplorer:
         """
         self.ep_gimbal.recenter(pitch_speed=100, yaw_speed=100).wait_for_completed()
         tof_dist = self.tof_handler.get_distance()
-        if 300 < tof_dist < 1200 and self.current_position and (self.current_position, self.current_orientation) not in self.watched_grid:
+        if 450 < tof_dist < 1200 and self.current_position and (self.current_position, self.current_orientation) not in self.watched_grid:
             self.watched_grid.append((self.current_position, self.current_orientation))
             # Phase 1 (บันทึกภาพด้วย)
             detections = self.scan_objects_fullframe(store=True, save_snapshot=True)
@@ -1480,7 +1480,7 @@ class MazeExplorer:
             """
             self.ep_camera.start_video_stream(display=False, resolution="720p")
 
-            self.set_target('blue', 'square')
+            self.set_target('green', 'circle')
             while True:
                 
                 if self.current_position not in self.internal_map.explored:
