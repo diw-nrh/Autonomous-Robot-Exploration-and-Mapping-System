@@ -1001,8 +1001,6 @@ class MazeExplorer:
         self._save_scan_results(wall_distances)
         self.autosave_snapshot()   # ← ADD
         return wall_distances
-
-        return wall_distances
     
     def _save_scan_results(self, wall_distances):
         """บันทึกผลการสแกนลงใน scan_log"""
@@ -1143,6 +1141,79 @@ class MazeExplorer:
     # ----------------------------------------------------------------------
     # Load autosave ล่าสุด (ค้นหาไฟล์เอง)
     # ----------------------------------------------------------------------
+
+    def load_map_state_json(self, path):
+        if not os.path.exists(path):
+            print(f"[LOAD] map not found: {path}")
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            meta = data.get("meta", {})
+            self.border = (
+                int(meta.get("border", {}).get("w", self.border[0])),
+                int(meta.get("border", {}).get("h", self.border[1])),
+            )
+
+            # graph
+            self.internal_map.graph = {}
+            for k, nb in data.get("graph", {}).items():
+                x, y = map(int, k.split(","))
+                self.internal_map.graph[(x, y)] = set((int(n[0]), int(n[1])) for n in nb)
+
+            # blocked
+            self.internal_map.blocked = set()
+            for pair in data.get("blocked", []):
+                a, b = pair
+                a = (int(a[0]), int(a[1]))
+                b = (int(b[0]), int(b[1]))
+                self.internal_map.blocked.add(tuple(sorted([a, b])))
+
+            # explored
+            self.internal_map.explored = set((int(p[0]), int(p[1])) for p in data.get("explored", []))
+
+            # visited_path
+            self.visited_path = [(int(p[0]), int(p[1])) for p in data.get("visited_path", [])]
+
+            # position & orientation
+            if self.visited_path:
+                self.current_position = self.visited_path[-1]
+            else:
+                pos = meta.get("final_position_grid", {})
+                self.current_position = (int(pos.get("x", 0)), int(pos.get("y", 0)))
+
+            self.current_orientation = int(meta.get("final_orientation", 0))
+
+            # sync pose handler
+            gx, gy = self.current_position
+            self.pose_handler.set_xy(gx * GRID_SIZE_M, gy * GRID_SIZE_M)
+            yaw = 0 if self.current_orientation == 0 else 90 if self.current_orientation == 1 else \
+                  180 if self.current_orientation == 2 else -90
+            self.pose_handler.set_yaw(yaw)
+
+            print(f"[LOAD] map loaded: pos={self.current_position}, ori={self.current_orientation}")
+            return True
+        except Exception as e:
+            print(f"[LOAD] map error: {e}")
+            return False
+
+    def load_targets_json(self, path):
+        if not os.path.exists(path):
+            print(f"[LOAD] targets not found: {path}")
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.detected_targets = list(data.get("targets", []))
+            print(f"[LOAD] targets loaded: {len(self.detected_targets)} entries")
+            return True
+        except Exception as e:
+            print(f"[LOAD] targets error: {e}")
+            return False
+
+
+
     def load_latest_autosave(self, prefix="run_autosave"):
         """
         ค้นหาและโหลด autosave คู่ล่าสุด (map + targets) ตามเวลาแก้ไขไฟล์
