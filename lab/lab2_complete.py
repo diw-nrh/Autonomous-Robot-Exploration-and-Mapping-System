@@ -36,8 +36,8 @@ from lab1_complete_mul import (
 CAMERA_HORIZONTAL_FOV = 109
 CAMERA_VERTICAL_FOV = 93
 # ====== ตั้งชื่อไฟล์ JSON (แก้ให้ตรงกับไฟล์ที่ได้จาก LAB 1) ======
-MAP_JSON_PATH = "map_state_run1_20251006_212644.json"
-TARGETS_JSON_PATH = "targets_run1_20251006_212644.json"
+MAP_JSON_PATH = "map_state_run1_20251007_101340.json"
+TARGETS_JSON_PATH = "targets_run1_20251007_101340.json"
 
 # ====== Utility: สร้างกราฟ/BFS จาก JSON ======
 def _graph_from_json(map_payload):
@@ -184,7 +184,7 @@ class MazeTargetRunner(MazeExplorer):
             start_grid = visited_path_prev[-1]
             start_yaw = self._infer_yaw_from_path(visited_path_prev)
         else:
-            start_grid = (0, 0)
+            start_grid = (2, 0)
             start_yaw = 0  # เหนือ
 
         # sync state
@@ -283,7 +283,7 @@ if __name__ == "__main__":
     ep.gimbal.sub_angle(freq=20, callback=gim.update)
     # (จะไม่ต้องอ่าน ToF ก็ได้ แต่ถ้าอยาก log ต่อ ก็สมัครไว้)
     ep.sensor.sub_distance(freq=10, callback=tof.update)
-    START_MODE = "resume"  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
+    START_MODE = "fresh"  # "fresh" = (0,0, North), "resume" = จุดสิ้นสุดรอบก่อน
     runner = MazeTargetRunner(ep, tof, gim, pose)
     runner.set_target('yellow', 'horizontal_rectangle')  # ค่า default เผื่อไม่มี filter
 

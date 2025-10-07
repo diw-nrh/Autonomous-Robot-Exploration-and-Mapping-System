@@ -329,7 +329,7 @@ class MazeExplorer:
         self.visited_path = [self.current_position]
         self.count = True
         # Exploration settings
-        self.border = (6, 6)  # ขนาดพื้นที่สำรวจ (กริด)
+        self.border = (2, 2)  # ขนาดพื้นที่สำรวจ (กริด)
         self.step_counter = 0  # นับจำนวนช่องที่เดิน
         
         # Exploration settings

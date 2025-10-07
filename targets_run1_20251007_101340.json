@@ -1,0 +1,58 @@
+{
+  "meta": {
+    "created_at": "2025-10-07T10:13:40",
+    "grid_size_m": 0.62
+  },
+  "targets": [
+    {
+      "color": "green",
+      "shape": "circle",
+      "grid": {
+        "x": 1,
+        "y": 5
+      },
+      "orientation": 1,
+      "orientation_name": "East"
+    },
+    {
+      "color": "green",
+      "shape": "circle",
+      "grid": {
+        "x": 1,
+        "y": 5
+      },
+      "orientation": 3,
+      "orientation_name": "West"
+    },
+    {
+      "color": "green",
+      "shape": "circle",
+      "grid": {
+        "x": 4,
+        "y": 5
+      },
+      "orientation": 1,
+      "orientation_name": "East"
+    },
+    {
+      "color": "green",
+      "shape": "circle",
+      "grid": {
+        "x": 3,
+        "y": 0
+      },
+      "orientation": 0,
+      "orientation_name": "North"
+    },
+    {
+      "color": "green",
+      "shape": "circle",
+      "grid": {
+        "x": 1,
+        "y": 0
+      },
+      "orientation": 3,
+      "orientation_name": "West"
+    }
+  ]
+}

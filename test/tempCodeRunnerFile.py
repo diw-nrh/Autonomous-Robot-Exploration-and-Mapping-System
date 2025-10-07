@@ -1,0 +1,2 @@
+
+            img_full = None
